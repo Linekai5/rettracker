@@ -17,7 +17,6 @@
 		"vite": "^7.2.6"
 	},
 	"dependencies": {
-		"leaflet": "^1.9.4",
-		"leaflet-rotatedmarker": "^0.2.0"
+		"maplibre-gl": "^2.4.0"
 	}
 }

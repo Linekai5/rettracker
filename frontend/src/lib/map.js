@@ -1,19 +1,49 @@
 export async function initMap(mapElement) {
-  const L = await import('leaflet');
+  const maplibreModule = await import('maplibre-gl');
+  const maplibregl = maplibreModule.default || maplibreModule;
 
-  // Fix default marker icons
-  delete L.Icon.Default.prototype._getIconUrl;
-  L.Icon.Default.mergeOptions({
-    iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-    iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-    shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png'
+  // OpenFreeMap tile URL can be overridden via env
+  // Use OpenFreeMap if explicitly configured via env, otherwise use CARTO dark_nolabels fallback
+  const rawTileUrl = import.meta.env.VITE_OPENFREEMAP_URL || 'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png';
+  // MapLibre requires concrete tile URLs; expand {s} to subdomains and strip {r}
+  let tilesArray;
+  if (rawTileUrl.includes('{s}')) {
+    const subs = ['a', 'b', 'c'];
+    tilesArray = subs.map(s => rawTileUrl.replace('{s}', s).replace('{r}', ''));
+  } else {
+    tilesArray = [rawTileUrl.replace('{r}', '')];
+  }
+
+  // MapLibre expects [lng, lat]
+  const initialCenter = [4.42, 51.98];
+  const initialZoom = 11;
+
+  const style = {
+    version: 8,
+    sources: {
+      base: {
+        type: 'raster',
+        tiles: tilesArray,
+        tileSize: 256,
+        attribution: '© OpenFreeMap / OpenStreetMap contributors'
+      }
+    },
+    layers: [
+      { id: 'base', type: 'raster', source: 'base', minzoom: 0, maxzoom: 22 }
+    ]
+  };
+
+  const map = new maplibregl.Map({
+    container: mapElement,
+    style,
+    center: initialCenter,
+    zoom: initialZoom,
+    interactive: true,
+    attributionControl: false
   });
 
-  const map = L.map(mapElement).setView([51.92, 4.47], 12);
+  // Ensure full-screen container background matches tiles to avoid white flash
+  try { map.getContainer().style.backgroundColor = '#04142a'; } catch (e) {}
 
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; OpenStreetMap contributors'
-  }).addTo(map);
-
-  return map; // Voor later markers toevoegen
+  return map;
 }
