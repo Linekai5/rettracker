@@ -3,17 +3,22 @@
   margin: 0;
   padding: 0;
   font-family: Arial, Helvetica, sans-serif;
+  overflow: hidden; /* Prevent scrolling */
 }
 
 .title {
-  position: absolute;
-  top: 10px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: #003082; /* RET blauw */
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #00163d; /* RET blauw */
   color: white;
-  padding: 10px 30px;
-  border-radius: 8px;
+  padding: 0 30px;
+  border-radius: 0;
   font-size: 1.8rem;
   z-index: 1000;
   box-shadow: 0 4px 10px rgba(0,0,0,0.3);
@@ -26,4 +31,12 @@
   height: 100%;
   z-index: 0;
   background-color: #04142a; /* match dark map tiles to avoid white flash */
+  /* Add padding-top to prevent map from being hidden under navbar */
+  padding-top: 60px;
+}
+
+/* Remove blue focus border from map and its children */
+.map-container :focus {
+  outline: none !important;
+  box-shadow: none !important;
 }
