@@ -17,7 +17,7 @@ async def kv78turbo_stream():
     socket.connect("tcp://pubsub.besteffort.ndovloket.nl:7817")
     socket.setsockopt_string(zmq.SUBSCRIBE, "")
 
-    print("Succesvol verbonden met KV78turbo endpoint – wacht op data...")
+    print("Verbonden met KV78turbo – wacht op goede berichten...")
 
     while True:
         try:
@@ -26,7 +26,8 @@ async def kv78turbo_stream():
             await asyncio.sleep(0.01)
             continue
 
-        if not message or not message.startswith(b'<'):
+        # Skip niet-XML of lege berichten
+        if not message or not message.lstrip().startswith(b'<'):
             continue
 
         try:
@@ -37,20 +38,20 @@ async def kv78turbo_stream():
             for posinfo in root.findall('.//POSINFO'):
                 dataowner = posinfo.find('dataownercode')
                 if dataowner is not None and dataowner.text == "RET":
-                    lat_elem = posinfo.find('latitude')
-                    lon_elem = posinfo.find('longitude')
-                    bearing_elem = posinfo.find('bearing')
-                    line_elem = posinfo.find('lineplanningnumber') or posinfo.find('linenumber') or posinfo.find('journeyNumber')
+                    lat = posinfo.find('latitude')
+                    lon = posinfo.find('longitude')
+                    bearing = posinfo.find('bearing')
+                    line = posinfo.find('lineplanningnumber') or posinfo.find('linenumber')
 
-                    if lat_elem is not None and lon_elem is not None:
-                        key = posinfo.find('vehiclenumber').text or str(hash(message))
+                    if lat is not None and lon is not None and lat.text and lon.text:
+                        key = posinfo.find('vehiclenumber').text or "unknown"
 
                         vehicle_data = {
                             "id": key,
-                            "lat": float(lat_elem.text),
-                            "lon": float(lon_elem.text),
-                            "line": line_elem.text if line_elem is not None else "?", 
-                            "bearing": float(bearing_elem.text) if bearing_elem is not None else 0
+                            "lat": float(lat.text),
+                            "lon": float(lon.text),
+                            "line": line.text if line is not None else "?",
+                            "bearing": float(bearing.text) if bearing is not None and bearing.text else 0
                         }
 
                         if key not in current_vehicles or current_vehicles[key] != vehicle_data:
@@ -58,11 +59,12 @@ async def kv78turbo_stream():
                             current_vehicles[key] = vehicle_data
 
             if updates:
-                print(f"Data gekregen: {len(updates)} RET voertuigen")
+                print(f"Goede update: {len(updates)} RET voertuigen")
                 yield f"data: {json.dumps({'updates': updates})}\n\n"
 
         except Exception as e:
-            print("Skip invalid bericht:", e)
+            # Volledig skip – geen log of yield
+            pass
 
 @app.get("/vehicles-sse")
 async def vehicles_sse(request: Request):
@@ -70,4 +72,4 @@ async def vehicles_sse(request: Request):
 
 @app.get("/")
 async def root():
-    return {"message": "KV78turbo backend draait – succesvolle connectie en data get! (9jan update)"}
+    return {"message": "KV78turbo snelle push draait – wacht op eerste data (kan paar minuten duren)."}
