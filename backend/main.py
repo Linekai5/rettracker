@@ -53,7 +53,7 @@ async def fetch_ovapi_data():
                     "entities": entities_total,
                     "debug_sample": sample,
                 }
-                print(f"Data updated: {len(new_updates)} vehicles (entities: {entities_total}). Sample: {sample}")
+                print(f"18:19 Data updated: {len(new_updates)} vehicles (entities: {entities_total}). Sample: {sample}")
             except Exception as e:
                 print("Fetch error:", e)
             await asyncio.sleep(POLL_INTERVAL)
