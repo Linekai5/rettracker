@@ -70,4 +70,4 @@ async def vehicles_sse(request: Request):
 
 @app.get("/")
 async def root():
-    return {"message": "KV78turbo backend draait – succesvolle connectie en data get!"}
+    return {"message": "KV78turbo backend draait – succesvolle connectie en data get! (9jan update)"}
