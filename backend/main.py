@@ -17,7 +17,7 @@ async def kv78turbo_stream():
     socket.connect("tcp://pubsub.besteffort.ndovloket.nl:7817")
     socket.setsockopt_string(zmq.SUBSCRIBE, "")
 
-    print("Verbonden met KV78turbo – wacht op goede berichten...")
+    print("Verbonden met KV78turbo – wacht op POSINFO berichten...")
 
     while True:
         try:
@@ -26,7 +26,7 @@ async def kv78turbo_stream():
             await asyncio.sleep(0.01)
             continue
 
-        # Skip niet-XML of lege berichten
+        # Alleen echte XML berichten verwerken
         if not message or not message.lstrip().startswith(b'<'):
             continue
 
@@ -35,6 +35,7 @@ async def kv78turbo_stream():
 
             updates = []
 
+            # Alleen POSINFO berichten verwerken (KV6 voertuigposities)
             for posinfo in root.findall('.//POSINFO'):
                 dataowner = posinfo.find('dataownercode')
                 if dataowner is not None and dataowner.text == "RET":
@@ -59,11 +60,11 @@ async def kv78turbo_stream():
                             current_vehicles[key] = vehicle_data
 
             if updates:
-                print(f"Goede update: {len(updates)} RET voertuigen")
+                print(f"RET update: {len(updates)} voertuigen")
                 yield f"data: {json.dumps({'updates': updates})}\n\n"
 
         except Exception as e:
-            # Volledig skip – geen log of yield
+            # Geen yield bij error – voorkomt "invalid token" in frontend
             pass
 
 @app.get("/vehicles-sse")
@@ -72,4 +73,4 @@ async def vehicles_sse(request: Request):
 
 @app.get("/")
 async def root():
-    return {"message": "KV78turbo snelle push draait – wacht op eerste data (kan paar minuten duren)."}
+    return {"message": "KV78turbo RET Tracker draait – live push met bijna 0 delay."}
