@@ -16,7 +16,8 @@ async def fetch_ovapi_data():
         while True:
             try:
                 headers = {"User-Agent": "RET-Tracker-Backend"}
-                url = "gtfs.ovapi.nl"
+                # De volledige URL inclusief protocol en pad
+                url = "http://gtfs.ovapi.nl"
                 response = await client.get(url, headers=headers)
                 
                 if response.status_code == 429:
@@ -35,6 +36,7 @@ async def fetch_ovapi_data():
                         v = entity.vehicle
                         route_id = v.trip.route_id
                         
+                        # Filter op RET voertuigen
                         if "RET" in route_id:
                             new_updates.append({
                                 "id": entity.id,
@@ -45,11 +47,12 @@ async def fetch_ovapi_data():
                             })
                 
                 cached_data = {"updates": new_updates, "count": len(new_updates)}
-                print(f"Data updated: {len(new_updates)} vehicles found.")
+                print(f"Data updated: {len(new_updates)} RET vehicles found.")
 
             except Exception as e:
                 print(f"Fetch error: {e}")
 
+            # Wacht 40 seconden voor de volgende update
             await asyncio.sleep(40)
 
 @app.on_event("startup")
