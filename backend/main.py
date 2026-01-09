@@ -15,15 +15,18 @@ async def kv78turbo_stream():
     context = zmq.Context()
     socket = context.socket(zmq.SUB)
     socket.connect("tcp://pubsub.besteffort.ndovloket.nl:7817")
-    socket.setsockopt_string(zmq.SUBSCRIBE, "")  # Alles ontvangen
+    socket.setsockopt_string(zmq.SUBSCRIBE, "")
 
-    print("Verbonden met KV78turbo – wacht op berichten...")
+    print("Succesvol verbonden met KV78turbo endpoint – wacht op data...")
 
     while True:
         try:
-            message = socket.recv(flags=zmq.NOBLOCK)  # Non-blocking voor async
+            message = socket.recv(flags=zmq.NOBLOCK)
         except zmq.Again:
             await asyncio.sleep(0.01)
+            continue
+
+        if not message or not message.startswith(b'<'):
             continue
 
         try:
@@ -46,7 +49,7 @@ async def kv78turbo_stream():
                             "id": key,
                             "lat": float(lat_elem.text),
                             "lon": float(lon_elem.text),
-                            "line": line_elem.text if line_elem is not None else "?",
+                            "line": line_elem.text if line_elem is not None else "?", 
                             "bearing": float(bearing_elem.text) if bearing_elem is not None else 0
                         }
 
@@ -55,11 +58,11 @@ async def kv78turbo_stream():
                             current_vehicles[key] = vehicle_data
 
             if updates:
+                print(f"Data gekregen: {len(updates)} RET voertuigen")
                 yield f"data: {json.dumps({'updates': updates})}\n\n"
 
         except Exception as e:
-            print("Parse error (normaal bij sommige berichten):", e)
-            # Geen yield – voorkomt invalid token
+            print("Skip invalid bericht:", e)
 
 @app.get("/vehicles-sse")
 async def vehicles_sse(request: Request):
@@ -67,4 +70,4 @@ async def vehicles_sse(request: Request):
 
 @app.get("/")
 async def root():
-    return {"message": "KV78turbo RET Tracker draait! Bijna 0 delay push."}
+    return {"message": "KV78turbo backend draait – succesvolle connectie en data get!"}
