@@ -1,67 +1,65 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from google.transit import gtfs_realtime_pb2 as gtfs
-import httpx
-import asyncio
-import json
-import os
+import httpx, asyncio, json, os
 
 app = FastAPI()
 
-# Config
 GTFS_VEHICLE_URL = os.getenv("GTFS_VEHICLE_URL", "https://gtfs.ovapi.nl/nl/vehiclePositions.pb")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "40"))   # seconden
-SSE_INTERVAL = int(os.getenv("SSE_INTERVAL", "5"))      # seconden
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "40"))
+SSE_INTERVAL = int(os.getenv("SSE_INTERVAL", "5"))
 
-cached_data = {"updates": [], "count": 0}
+cached_data = {"updates": [], "count": 0, "entities": 0, "debug_sample": []}
 
 async def fetch_ovapi_data():
     global cached_data
-    headers = {
-        "User-Agent": "RET-Tracker-Backend",
-        "Accept": "application/x-protobuf"
-    }
+    headers = {"User-Agent": "RET-Tracker-Backend", "Accept": "application/x-protobuf"}
 
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         while True:
             try:
                 resp = await client.get(GTFS_VEHICLE_URL, headers=headers)
+                print("HTTP", resp.status_code, "bytes", len(resp.content))
                 if resp.status_code == 429:
-                    print("Error 429: rate limit. Wacht 60s.")
+                    print("Rate limit 429 → 60s pauze")
                     await asyncio.sleep(60)
                     continue
-
                 resp.raise_for_status()
 
                 feed = gtfs.FeedMessage()
                 feed.ParseFromString(resp.content)
+                entities_total = len(feed.entity)
+                print("Entities in feed:", entities_total)
 
                 new_updates = []
+                sample = []
                 for entity in feed.entity:
                     if entity.HasField("vehicle") and entity.vehicle.HasField("position"):
                         v = entity.vehicle
                         route_id = v.trip.route_id
-
-                        # Filter op RET; pas aan als je ook andere vervoerders wilt
-                        if "RET" in route_id:
-                            new_updates.append({
-                                "id": entity.id,
-                                "lat": v.position.latitude,
-                                "lon": v.position.longitude,
-                                "line": route_id.split(":")[-1],
-                                "bearing": v.position.bearing if v.position.HasField("bearing") else 0
-                            })
-
-                cached_data = {"updates": new_updates, "count": len(new_updates)}
-                print(f"Data updated: {len(new_updates)} RET vehicles found.")
+                        # Tijdelijk GEEN filter om te zien of er iets is:
+                        new_updates.append({
+                            "id": entity.id,
+                            "lat": v.position.latitude,
+                            "lon": v.position.longitude,
+                            "line": route_id,
+                            "bearing": v.position.bearing if v.position.HasField("bearing") else 0
+                        })
+                        if len(sample) < 5:
+                            sample.append({"id": entity.id, "route": route_id})
+                cached_data = {
+                    "updates": new_updates,
+                    "count": len(new_updates),
+                    "entities": entities_total,
+                    "debug_sample": sample,
+                }
+                print(f"Data updated: {len(new_updates)} vehicles (entities: {entities_total}). Sample: {sample}")
             except Exception as e:
-                print(f"Fetch error: {e}")
-
+                print("Fetch error:", e)
             await asyncio.sleep(POLL_INTERVAL)
 
 @app.on_event("startup")
 async def startup_event():
-    # Start de fetch-task op de achtergrond
     asyncio.create_task(fetch_ovapi_data())
 
 async def event_generator():
@@ -75,8 +73,4 @@ async def vehicles_sse():
 
 @app.get("/")
 async def root():
-    return {
-        "status": "online",
-        "ret_count": len(cached_data.get("updates", [])),
-        "endpoint": "/vehicles-sse"
-    }
+    return cached_data
