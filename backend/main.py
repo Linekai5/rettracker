@@ -10,7 +10,7 @@ app = FastAPI()
 
 current_vehicles = {}
 last_fetch_time = 0
-FETCH_INTERVAL = 5
+FETCH_INTERVAL = 5  # Elke 5s – snel voor smooth beweging
 
 async def vehicle_updates():
     global current_vehicles, last_fetch_time
@@ -57,18 +57,17 @@ async def vehicle_updates():
                     current_vehicles = new_vehicles
                     last_fetch_time = current_time
 
-                    if updates:
-                        print(f"Update: {len(updates)} RET voertuigen")
+                    print(f"Update: {len(updates)} RET voertuigen geladen")
 
                 except Exception as e:
-                    print("Fout:", e)
+                    print("Fout bij ophalen:", e)
 
             if updates:
                 yield f"data: {json.dumps({'updates': updates})}\n\n"
             else:
-                yield ": heartbeat\n\n"
+                yield ": heartbeat\n\n"  # Houdt Cloudflare connection open
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(3)  # Check elke 3s
 
 @app.get("/vehicles-sse")
 async def vehicles_sse(request: Request):
@@ -76,4 +75,4 @@ async def vehicles_sse(request: Request):
 
 @app.get("/")
 async def root():
-    return {"message": "RET Tracker – snelle ovapi (5s updates)."}
+    return {"message": "RET Tracker – snelle ovapi (5s updates, geen nulls)."}
