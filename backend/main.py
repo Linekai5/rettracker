@@ -10,9 +10,8 @@ app = FastAPI()
 
 current_vehicles = {}
 last_fetch_time = 0
-FETCH_INTERVAL = 8.0       # seconds - realistic production value
-BATCH_SIZE = 40            # safe batch size
-ALLOWED_TYPES = {"TRAM"}   # only trams
+FETCH_INTERVAL = 8.0  # Elke 8 seconden – snel en veilig
+BATCH_SIZE = 40       # Veilige batch grootte voor /journey/ calls
 
 async def vehicle_updates():
     global current_vehicles, last_fetch_time
@@ -24,24 +23,21 @@ async def vehicle_updates():
 
             if now - last_fetch_time >= FETCH_INTERVAL:
                 try:
-                    # 1. Get list of active journeys
+                    # Stap 1: Haal alle actieve RET journeys op
                     resp_keys = await client.get("https://v0.ovapi.nl/journey/")
                     resp_keys.raise_for_status()
 
-                    journey_keys = [
-                        k for k in resp_keys.json().keys()
-                        if k.startswith("RET_")
-                    ]
+                    journey_keys = [k for k in resp_keys.json().keys() if k.startswith("RET_")]
 
                     if not journey_keys:
-                        print("No RET journeys found")
+                        print("Geen RET journeys gevonden")
                         await asyncio.sleep(2.0)
                         continue
 
                     new_vehicles = {}
-                    print(f"Fetching {len(journey_keys)} RET journeys...")
+                    print(f"Haal {len(journey_keys)} RET journeys op...")
 
-                    # 2. Batch fetch
+                    # Stap 2: Batch fetch (om rate limit te voorkomen)
                     for i in range(0, len(journey_keys), BATCH_SIZE):
                         batch = journey_keys[i:i + BATCH_SIZE]
                         url = f"https://v0.ovapi.nl/journey/{','.join(batch)}"
@@ -56,24 +52,29 @@ async def vehicle_updates():
                                 for stop_id, stop in stops.items():
                                     transport_type = stop.get("TransportType")
 
-                                    if transport_type not in ALLOWED_TYPES:
+                                    # Alleen tram, metro, bus (je kunt dit aanpassen)
+                                    if transport_type not in {"TRAM", "METRO", "BUS"}:
                                         continue
 
-                                    if stop.get("TripStopStatus") in ("DRIVING", "ARRIVED"):
+                                    # Check of het een actieve rit is
+                                    if stop.get("TripStopStatus") in ("DRIVING", "ARRIVED", "DEPARTING"):
                                         vehicle = {
                                             "id": f"{journey_id}_{stop_id}",
                                             "lat": stop.get("latitude"),
                                             "lon": stop.get("longitude"),
                                             "line": stop.get("LinePublicNumber"),
-                                            "bearing": stop.get("SideCode"),
+                                            "bearing": stop.get("SideCode", 0),  # richting (bearing)
                                             "speed": stop.get("Speed", 0),
-                                            "type": transport_type,
+                                            "type": transport_type,               # TRAM, METRO, BUS
                                             "destination": stop.get("DestinationName50"),
-                                            "last_update": stop.get("LastUpdateTimeStamp"),
+                                            "last_update": stop.get("LastUpdateTimeStamp"),  # Timestamp!
+                                            "delay": stop.get("DelayInSeconds", 0),
+                                            "direction": stop.get("Direction"),
                                         }
 
                                         new_vehicles[vehicle["id"]] = vehicle
 
+                                        # Alleen als nieuw of veranderd → stuur update
                                         if (
                                             vehicle["id"] not in current_vehicles
                                             or current_vehicles[vehicle["id"]] != vehicle
@@ -81,25 +82,23 @@ async def vehicle_updates():
                                             updates.append(vehicle)
 
                         except Exception as e:
-                            print(f"Batch failed: {url} → {str(e)}")
-                            # Continue with next batch
+                            print(f"Batch mislukt: {url} → {str(e)}")
 
-                        await asyncio.sleep(0.15)  # small delay between batches
+                        await asyncio.sleep(0.15)  # Kleine pauze tussen batches
 
-                    # Update global state
+                    # Update globale cache
                     current_vehicles = new_vehicles
                     last_fetch_time = now
-                    print(f"Update complete - {len(updates)} vehicles changed")
+                    print(f"Update klaar - {len(updates)} voertuigen veranderd")
 
                 except Exception as e:
-                    print(f"Fetch error: {str(e)}")
-                    # Don't crash the loop
+                    print(f"Hoofd fetch fout: {str(e)}")
 
-            # Send updates only if we have something
+            # Stuur updates als er iets is
             if updates:
                 yield f"data: {json.dumps({'updates': updates})}\n\n"
 
-            # Sleep with small random jitter to avoid thundering herd
+            # Kleine random jitter om throttling te voorkomen
             sleep_time = FETCH_INTERVAL + random.uniform(-1.0, 1.0)
             await asyncio.sleep(max(1.0, sleep_time))
 
@@ -112,7 +111,7 @@ async def vehicles_sse(request: Request):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",           # important vs proxies
+            "X-Accel-Buffering": "no",  # Belangrijk tegen proxies/Cloudflare
             "Access-Control-Allow-Origin": "*",
         },
     )
@@ -121,5 +120,5 @@ async def vehicles_sse(request: Request):
 @app.get("/")
 async def root():
     return {
-        "message": "RET Tram Tracker – production mode (updates ~every 8s)"
+        "message": "RET Tram/Metro/Bus Tracker – live elke ~8s"
     }
