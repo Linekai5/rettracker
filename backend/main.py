@@ -1,7 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
-from google.transit import gtfs_realtime_pb2 as gtfs
-import httpx, asyncio, json, os
+import httpx
+import asyncio
+import json
+import time
+import random
 
 app = FastAPI()
 
@@ -9,7 +12,7 @@ current_vehicles = {}
 last_fetch_time = 0
 FETCH_INTERVAL = 8.0       # seconds - realistic production value
 BATCH_SIZE = 40            # safe batch size
-ALLOWED_TYPES = {"TRAM"}   # only trams
+ALLOWED_TYPES = {"TRAM", "METRO", "BUS"}  # nu ook metro en bus (pas aan als je wilt)
 
 async def vehicle_updates():
     global current_vehicles, last_fetch_time
@@ -56,17 +59,19 @@ async def vehicle_updates():
                                     if transport_type not in ALLOWED_TYPES:
                                         continue
 
-                                    if stop.get("TripStopStatus") in ("DRIVING", "ARRIVED"):
+                                    if stop.get("TripStopStatus") in ("DRIVING", "ARRIVED", "DEPARTING"):
                                         vehicle = {
                                             "id": f"{journey_id}_{stop_id}",
                                             "lat": stop.get("latitude"),
                                             "lon": stop.get("longitude"),
                                             "line": stop.get("LinePublicNumber"),
-                                            "bearing": stop.get("SideCode"),
+                                            "bearing": stop.get("SideCode", 0),
                                             "speed": stop.get("Speed", 0),
-                                            "type": transport_type,
+                                            "type": transport_type,  # TRAM, METRO, BUS
                                             "destination": stop.get("DestinationName50"),
-                                            "last_update": stop.get("LastUpdateTimeStamp"),
+                                            "last_update": stop.get("LastUpdateTimeStamp"),  # Timestamp!
+                                            "delay": stop.get("DelayInSeconds", 0),
+                                            "direction": stop.get("Direction", "?"),
                                         }
 
                                         new_vehicles[vehicle["id"]] = vehicle
@@ -79,24 +84,19 @@ async def vehicle_updates():
 
                         except Exception as e:
                             print(f"Batch failed: {url} → {str(e)}")
-                            # Continue with next batch
 
-                        await asyncio.sleep(0.15)  # small delay between batches
+                        await asyncio.sleep(0.15)  # small delay
 
-                    # Update global state
                     current_vehicles = new_vehicles
                     last_fetch_time = now
                     print(f"Update complete - {len(updates)} vehicles changed")
 
                 except Exception as e:
                     print(f"Fetch error: {str(e)}")
-                    # Don't crash the loop
 
-            # Send updates only if we have something
             if updates:
                 yield f"data: {json.dumps({'updates': updates})}\n\n"
 
-            # Sleep with small random jitter to avoid thundering herd
             sleep_time = FETCH_INTERVAL + random.uniform(-1.0, 1.0)
             await asyncio.sleep(max(1.0, sleep_time))
 
@@ -109,7 +109,7 @@ async def vehicles_sse(request: Request):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",           # important vs proxies
+            "X-Accel-Buffering": "no",
             "Access-Control-Allow-Origin": "*",
         },
     )
@@ -118,5 +118,5 @@ async def vehicles_sse(request: Request):
 @app.get("/")
 async def root():
     return {
-        "message": "RET Tram Tracker – production mode (updates ~every 8s)"
+        "message": "RET Tram/Metro/Bus Tracker – production mode (updates ~every 8s)"
     }
