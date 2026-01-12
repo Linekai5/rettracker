@@ -10,7 +10,7 @@ app = FastAPI()
 
 current_vehicles = {}
 last_fetch_time = 0
-FETCH_INTERVAL = 8.0       # Elke 8s – snel en veilig
+FETCH_INTERVAL = 3.0       # Elke 5s – snel en veilig
 BATCH_SIZE = 40            # Veilige batch
 ALLOWED_TYPES = {"TRAM", "METRO", "BUS"}  # Alles wat je wilt (pas aan)
 
