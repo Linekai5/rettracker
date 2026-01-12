@@ -10,38 +10,34 @@ app = FastAPI()
 
 current_vehicles = {}
 last_fetch_time = 0
-FETCH_INTERVAL = 8.0       # seconds - realistic production value
-BATCH_SIZE = 40            # safe batch size
-ALLOWED_TYPES = {"TRAM", "METRO", "BUS"}  # nu ook metro en bus (pas aan als je wilt)
+FETCH_INTERVAL = 8.0       # Elke 8s – snel en veilig
+BATCH_SIZE = 40            # Veilige batch
+ALLOWED_TYPES = {"TRAM", "METRO", "BUS"}  # Alles wat je wilt (pas aan)
 
 async def vehicle_updates():
     global current_vehicles, last_fetch_time
 
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+    # verify=False om SSL mismatch te fixen
+    async with httpx.AsyncClient(verify=False, timeout=30.0, follow_redirects=True) as client:
         while True:
             updates = []
             now = time.time()
 
             if now - last_fetch_time >= FETCH_INTERVAL:
                 try:
-                    # 1. Get list of active journeys
                     resp_keys = await client.get("https://v0.ovapi.nl/journey/")
                     resp_keys.raise_for_status()
 
-                    journey_keys = [
-                        k for k in resp_keys.json().keys()
-                        if k.startswith("RET_")
-                    ]
+                    journey_keys = [k for k in resp_keys.json().keys() if k.startswith("RET_")]
 
                     if not journey_keys:
-                        print("No RET journeys found")
+                        print("Geen RET journeys")
                         await asyncio.sleep(2.0)
                         continue
 
                     new_vehicles = {}
-                    print(f"Fetching {len(journey_keys)} RET journeys...")
+                    print(f"Haal {len(journey_keys)} RET journeys op...")
 
-                    # 2. Batch fetch
                     for i in range(0, len(journey_keys), BATCH_SIZE):
                         batch = journey_keys[i:i + BATCH_SIZE]
                         url = f"https://v0.ovapi.nl/journey/{','.join(batch)}"
@@ -83,16 +79,16 @@ async def vehicle_updates():
                                             updates.append(vehicle)
 
                         except Exception as e:
-                            print(f"Batch failed: {url} → {str(e)}")
+                            print(f"Batch mislukt: {url} → {str(e)}")
 
-                        await asyncio.sleep(0.15)  # small delay
+                        await asyncio.sleep(0.15)
 
                     current_vehicles = new_vehicles
                     last_fetch_time = now
-                    print(f"Update complete - {len(updates)} vehicles changed")
+                    print(f"Update klaar - {len(updates)} veranderd")
 
                 except Exception as e:
-                    print(f"Fetch error: {str(e)}")
+                    print(f"Hoofd fetch fout: {str(e)}")
 
             if updates:
                 yield f"data: {json.dumps({'updates': updates})}\n\n"
@@ -118,5 +114,5 @@ async def vehicles_sse(request: Request):
 @app.get("/")
 async def root():
     return {
-        "message": "RET Tram/Metro/Bus Tracker – production mode (updates ~every 8s)"
+        "message": "RET Tram/Metro/Bus Tracker – live elke ~8s"
     }
