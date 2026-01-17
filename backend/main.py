@@ -130,5 +130,5 @@ async def vehicles_sse(request: Request):
 @app.get("/")
 async def root():
     return {
-        "message": "RET Tram/Metro/Bus Tracker – live elke ~8s"
+        "message": "RET Tram/Metro/Bus Tracker – parallel loading"
     }
