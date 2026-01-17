@@ -58,8 +58,8 @@ async def vehicle_updates():
                                     if stop.get("TripStopStatus") in ("DRIVING", "ARRIVED", "DEPARTING"):
                                         vehicle = {
                                             "id": f"{journey_id}_{stop_id}",
-                                            "lat": stop.get("latitude"),
-                                            "lon": stop.get("longitude"),
+                                            "lat": stop.get("Latitude"),
+                                            "lon": stop.get("Longitude"),
                                             "line": stop.get("LinePublicNumber"),
                                             "bearing": stop.get("SideCode", 0),
                                             "speed": stop.get("Speed", 0),
