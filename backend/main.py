@@ -1,20 +1,23 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
+from contextlib import asynccontextmanager
 import httpx
 import asyncio
 import json
 import time
-import random
 
-app = FastAPI()
+# --- Configuration ---
+FETCH_INTERVAL = 0.5       
+BATCH_SIZE = 50            
+ALLOWED_TYPES = {"TRAM", "METRO", "BUS"}
 
-current_vehicles = {}
-last_fetch_time = 0
-FETCH_INTERVAL = 0.5       # Set to 0.5s for "blazing fast" updates
-BATCH_SIZE = 50            # Increased batch size slightly
-ALLOWED_TYPES = {"TRAM", "METRO", "BUS"}  # Alles wat je wilt (pas aan)
+# --- Global State ---
+# Stores the latest known state of all vehicles
+current_vehicles = {} 
+# List of queues for connected clients
+subscribers = set()
 
-# Helper function for parallel requests
+# Helper for parallel requests
 async def fetch_batch(client, url):
     try:
         resp = await client.get(url)
@@ -24,43 +27,47 @@ async def fetch_batch(client, url):
         pass
     return {}
 
-async def vehicle_updates():
-    global current_vehicles, last_fetch_time
-
-    # Increased limits to allow parallel connections
+# --- Background Worker ---
+async def data_fetcher():
+    """
+    Runs in the background. 
+    Fetches data ONCE per interval and broadcasts to ALL subscribers.
+    """
+    global current_vehicles
+    print("Background fetcher started.")
+    
     limits = httpx.Limits(max_keepalive_connections=20, max_connections=50)
     
-    # verify=False om SSL mismatch te fixen
     async with httpx.AsyncClient(verify=False, timeout=10.0, follow_redirects=True, limits=limits) as client:
         while True:
+            start_time = time.time()
             updates = []
-            now = time.time()
+            new_vehicles = {}
 
             try:
+                # 1. Get all journey keys
                 resp_keys = await client.get("https://v0.ovapi.nl/journey/")
-                resp_keys.raise_for_status()
+                if resp_keys.status_code != 200:
+                    await asyncio.sleep(1)
+                    continue
 
                 journey_keys = [k for k in resp_keys.json().keys() if k.startswith("RET_")]
 
                 if not journey_keys:
-                    print("Geen RET journeys")
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(1)
                     continue
 
-                new_vehicles = {}
-                # print(f"Haal {len(journey_keys)} RET journeys op...") # Commented out to reduce log spam
-
-                # Prepare all batch requests
+                # 2. Fetch details in parallel batches
                 tasks = []
                 for i in range(0, len(journey_keys), BATCH_SIZE):
                     batch = journey_keys[i:i + BATCH_SIZE]
                     url = f"https://v0.ovapi.nl/journey/{','.join(batch)}"
                     tasks.append(fetch_batch(client, url))
 
-                # Fire all requests at once (Parallel execution)
+                # Fire all requests at once
                 results = await asyncio.gather(*tasks)
 
-                # Process results
+                # 3. Process results
                 for journeys in results:
                     if not journeys:
                         continue
@@ -81,42 +88,85 @@ async def vehicle_updates():
                                     "line": stop.get("LinePublicNumber"),
                                     "bearing": stop.get("SideCode", 0),
                                     "speed": stop.get("Speed", 0),
-                                    "type": transport_type,  # TRAM, METRO, BUS
+                                    "type": transport_type,
                                     "destination": stop.get("DestinationName50"),
-                                    "last_update": stop.get("LastUpdateTimeStamp"),  # Timestamp!
+                                    "last_update": stop.get("LastUpdateTimeStamp"),
                                     "delay": stop.get("DelayInSeconds", 0),
                                     "direction": stop.get("Direction", "?"),
                                 }
 
+                                # Add to local map for this tick
                                 new_vehicles[vehicle["id"]] = vehicle
 
+                                # Check if changed compared to GLOBAL state
                                 if (
                                     vehicle["id"] not in current_vehicles
                                     or current_vehicles[vehicle["id"]] != vehicle
                                 ):
                                     updates.append(vehicle)
 
+                # Update global state for next tick
                 current_vehicles = new_vehicles
-                last_fetch_time = now
-                # print(f"Update klaar - {len(updates)} veranderd")
+
+                # 4. Broadcast updates to any connected clients
+                if updates and subscribers:
+                    message = json.dumps({"updates": updates})
+                    # Send to every open tab's queue
+                    for q in list(subscribers):
+                        await q.put(message)
 
             except Exception as e:
-                print(f"Hoofd fetch fout: {str(e)}")
+                print(f"Error in fetcher: {e}")
 
-            if updates:
-                yield f"data: {json.dumps({'updates': updates})}\n\n"
-
-            # Calculate sleep to maintain ~1s loop if processing was fast, 
-            # or run immediately if processing took longer than interval.
-            elapsed = time.time() - now
+            # Precise sleep to keep blazing fast rate
+            elapsed = time.time() - start_time
             sleep_time = max(0.1, FETCH_INTERVAL - elapsed)
             await asyncio.sleep(sleep_time)
 
 
+# --- Lifecycle Manager ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Start the background loop
+    task = asyncio.create_task(data_fetcher())
+    yield
+    # Shutdown: Stop the loop
+    task.cancel()
+
+
+app = FastAPI(lifespan=lifespan)
+
 @app.get("/vehicles-sse")
 async def vehicles_sse(request: Request):
+    """
+    Each client gets their own Queue.
+    The background worker pushes data into this Queue.
+    """
+    async def event_generator():
+        q = asyncio.Queue()
+        subscribers.add(q)
+        try:
+            # 1. Send IMMEDIATE full snapshot upon connection
+            # (So user doesn't wait for next tick to see vehicles)
+            initial_data = list(current_vehicles.values())
+            if initial_data:
+                yield f"data: {json.dumps({'updates': initial_data})}\n\n"
+
+            # 2. Loop forever sending updates from the queue
+            while True:
+                if await request.is_disconnected():
+                    break
+                    
+                data = await q.get()
+                yield f"data: {data}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # Cleanup when tab closes
+            subscribers.discard(q)
+
     return StreamingResponse(
-        vehicle_updates(),
+        event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -126,9 +176,10 @@ async def vehicles_sse(request: Request):
         },
     )
 
-
 @app.get("/")
 async def root():
     return {
-        "message": "RET Tram/Metro/Bus Tracker – parallel loading"
+        "message": "RET Tracker - High Performance Broadcaster Active",
+        "active_clients": len(subscribers),
+        "tracked_vehicles": len(current_vehicles)
     }
