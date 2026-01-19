@@ -98,19 +98,27 @@ async def vehicle_worker():
                     ts = v.timestamp if v.timestamp else int(time.time())
 
                     speed = 0.0
-                    if pos.HasField('speed'):
-                        speed = pos.speed
-                    elif v_id in current_vehicles:
-                        # Calculate speed manually if missing
+                    
+                    # 1. Calculate speed or preserve previous
+                    if v_id in current_vehicles:
                         prev_v = current_vehicles[v_id]
                         prev_lat = prev_v["lat"]
                         prev_lon = prev_v["lon"]
                         prev_ts = prev_v["timestamp"]
                         
-                        time_diff = ts - prev_ts
-                        if time_diff > 0:
-                            dist = haversine_distance(prev_lat, prev_lon, lat, lon)
-                            speed = dist / time_diff
+                        if ts == prev_ts:
+                            # 2a. Data hasn't changed? Keep the previously calculated/known speed
+                            speed = prev_v["speed"]
+                        else:
+                            # 2b. New data? Calculate speed based on distance/time
+                            time_diff = ts - prev_ts
+                            if time_diff > 0:
+                                dist = haversine_distance(prev_lat, prev_lon, lat, lon)
+                                speed = dist / time_diff
+
+                    # 3. If GTFS feed provides a non-zero speed, prefer it
+                    if pos.HasField('speed') and pos.speed > 0:
+                        speed = pos.speed
 
                     vehicle_data = {
                         "id": v_id,
