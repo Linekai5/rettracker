@@ -221,12 +221,12 @@ async def vehicles_sse(request: Request):
             if current_vehicles:
                 # Convert dict to list for initial payload
                 snapshot = list(current_vehicles.values())
-                yield f"data: {json.dumps({'type': 'vehicles', 'data': snapshot})}\n\n"
+                yield f"data: {json.dumps({'type': 'vehicles', 'data': snapshot})}\\n\\n"
 
             while True:
                 if await request.is_disconnected(): break
                 data = await q.get()
-                yield f"data: {data}\n\n"
+                yield f"data: {data}\\n\\n"
         except asyncio.CancelledError:
             pass
         finally:
@@ -255,13 +255,13 @@ async def stops_sse(request: Request):
                 chunk_size = 50
                 for i in range(0, len(all_stops), chunk_size):
                     chunk = all_stops[i:i + chunk_size]
-                    yield f"data: {json.dumps({'type': 'stops', 'data': chunk})}\n\n"
+                    yield f"data: {json.dumps({'type': 'stops', 'data': chunk})}\\n\\n"
                     await asyncio.sleep(0.01)
 
             while True:
                 if await request.is_disconnected(): break
                 data = await q.get()
-                yield f"data: {data}\n\n"
+                yield f"data: {data}\\n\\n"
         except asyncio.CancelledError:
             pass
         finally:
@@ -286,3 +286,7 @@ async def root():
         "stops_with_predictions": len(current_stops),
         "clients": len(vehicle_subscribers) + len(stop_subscribers)
     }
+
+with open('/workspaces/rettracker/backend/main.py', 'w') as f:
+    f.write(""")
+"""
