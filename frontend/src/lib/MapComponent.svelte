@@ -2,26 +2,112 @@
   import { onMount, onDestroy } from 'svelte';
   import { initMap } from './map.js';
   import { browser } from '$app/environment';
+  import retData from '$lib/assets/ret_network.json';
 
   let mapElement;
   let map;
 
   onMount(async () => {
-    if (!browser) return; // Veiligheid, alleen in browser
+    if (!browser) return;
 
     map = await initMap(mapElement);
 
-    // Belangrijk: forceer Leaflet om de grootte te herkennen
-    setTimeout(() => {
-      if (map) map.invalidateSize();
-    }, 100);
+    map.on('load', () => {
+       // Add the single source containing all RET features
+       map.addSource('ret-data', {
+         type: 'geojson',
+         data: retData
+       });
 
-    console.log('Kaart geladen en resized!');
+       // --- 1. Bus Layer (Bottom) ---
+       map.addLayer({
+         id: 'ret-bus',
+         type: 'line',
+         source: 'ret-data',
+         filter: ['==', 'layer', 'bus'],
+         layout: {
+           'line-join': 'round',
+           'line-cap': 'round'
+         },
+         paint: {
+           'line-color': '#808080', // Grey for buses to reduce visual clutter
+           'line-width': [
+             'interpolate', ['linear'], ['zoom'],
+             10, 0.5,
+             14, 1.5
+           ],
+           'line-opacity': 0.6
+         }
+       });
+
+       // --- 2. Tram Layer (Middle) ---
+       map.addLayer({
+         id: 'ret-tram',
+         type: 'line',
+         source: 'ret-data',
+         filter: ['==', 'layer', 'tram'],
+         layout: {
+           'line-join': 'round',
+           'line-cap': 'round'
+         },
+         paint: {
+           // Uniform dark purple color for all tram tracks as requested
+           'line-color': '#20023F',
+           'line-width': [
+             'interpolate', ['linear'], ['zoom'],
+             10, 0.5,
+             14, 1.5
+           ],
+           'line-opacity': 0.9
+         }
+       });
+
+       // --- 3. Metro Layer (Top) ---
+       map.addLayer({
+         id: 'ret-metro',
+         type: 'line',
+         source: 'ret-data',
+         filter: ['==', 'layer', 'metro'],
+         layout: {
+           'line-join': 'round',
+           'line-cap': 'round'
+         },
+         paint: {
+           'line-color': ['get', 'color'],
+           'line-width': [
+             'interpolate', ['linear'], ['zoom'],
+             10, 1.5,
+             14, 3
+           ],
+           'line-opacity': 1.0
+         }
+       });
+
+       // --- 4. Stops Layer (Overlay) ---
+       map.addLayer({
+         id: 'ret-stops',
+         type: 'circle',
+         source: 'ret-data',
+         filter: ['has', 'isStop'],
+         paint: {
+           'circle-color': '#ffffff',
+           'circle-radius': [
+             'interpolate', ['linear'], ['zoom'],
+             10, 2,
+             14, 4
+           ],
+           'circle-stroke-width': 1.5,
+           'circle-stroke-color': '#000000',
+           'circle-opacity': 1
+         }
+       });
+    });
+
+    map.resize();
   });
 
-  // Optioneel: resize bij window resize (voor mobiel etc.)
   function handleResize() {
-    if (map) map.invalidateSize();
+    if (map) map.resize();
   }
 
   if (browser) {
