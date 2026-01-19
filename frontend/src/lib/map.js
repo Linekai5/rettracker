@@ -18,7 +18,7 @@ export async function initMap(mapElement) {
   // Centered on Randstad (between R'dam and Den Haag)
   const initialCenter = [4.38, 51.98];
   const initialZoom = 10.5;
-
+  
   const style = {
     version: 8,
     sources: {

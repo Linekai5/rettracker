@@ -30,7 +30,7 @@
            'line-cap': 'round'
          },
          paint: {
-           'line-color': '#808080', // Grey for buses to reduce visual clutter
+           'line-color': '#D3D3D3', // Light Grey as requested
            'line-width': [
              'interpolate', ['linear'], ['zoom'],
              10, 0.5,
@@ -52,7 +52,7 @@
          },
          paint: {
            // Uniform dark purple color for all tram tracks as requested
-           'line-color': '#20023F',
+           'line-color': '#D100AA',
            'line-width': [
              'interpolate', ['linear'], ['zoom'],
              10, 0.5,

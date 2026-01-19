@@ -12,24 +12,17 @@ const ENDPOINTS = [
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
 ];
 
-// Whitelist of valid RET lines (Updated for 2024/2025 network changes)
-const WHITELIST = new Set([
+// Whitelist of valid RET TRAM/METRO lines
+// Buses are filtered by OPERATOR name, not whitelist (too many lines)
+const WHITELIST_TRAM_METRO = new Set([
     // Metro
     'A','B','C','D','E',
-    // Trams (New Network Structure)
-    '1', // De Esch – Woudhoek/Holy
-    '2', // Keizerswaard – Charlois
-    '3', // Barendrecht – Rotterdam Centraal
-    '4', // Molenlaan – Heemraadsplein
-    '5', // Beverwaard – Rotterdam Centraal
-    '6', // Het Lage Land – Marconiplein
-    '7', // Woudestein – Willemsplein
-    '8', // Schiebroek – Spangen
-    // Legacy/TramPlus (Kept just in case, though user says they don't exist)
-    '20','21','23','24','25' 
+    // Trams
+    '1','2','3','4','5','6','7','8',
+    '20','21','23','24','25'
 ]);
 
-// RET Metro Colors (Official or Standard approx)
+// RET Metro Colors
 const METRO_COLORS = {
     'A': '#1ea245', // Green
     'B': '#ffce00', // Yellow
@@ -39,11 +32,10 @@ const METRO_COLORS = {
 };
 
 // Bounding Box: Rotterdam Area
-// 51.8 to 52.03 Lat, 4.3 to 4.7 Lon
 const QUERY = `
     [out:json][timeout:90];
     (
-      relation["route"~"subway|tram|light_rail"](51.8,4.3,52.03,4.7);
+      relation["route"~"subway|tram|light_rail|bus"](51.8,4.3,52.03,4.7);
     );
     out geom;
 `;
@@ -64,7 +56,6 @@ async function fetchWithRetry() {
             clearTimeout(id);
 
             if (!response.ok) {
-                const text = await response.text();
                 console.warn(`Failed: ${response.status} ${response.statusText}`);
                 continue;
             }
@@ -81,7 +72,7 @@ async function fetchWithRetry() {
 
 async function main() {
     try {
-        console.log("Fetching Rotterdam Trams & Metro (Geographic Search)...");
+        console.log("Fetching Rotterdam Public Transport (Geographic Search)...");
         const rawOsmData = await fetchWithRetry();
 
         console.log("Converting to GeoJSON...");
@@ -92,32 +83,45 @@ async function main() {
 
         for (const f of geojson.features) {
             const p = f.properties || {};
-            const ref = String(p.ref).toUpperCase();
-            
-            // 1. Whitelist Check
-            if (!p.ref || !WHITELIST.has(ref)) continue;
-            
-            // 2. Additional validity checks (exclude known non-RET operators if leaked)
-            if (p.operator && p.operator.includes('HTM')) continue;
+            const ref = String(p.ref || '').toUpperCase();
+            const route = p.route;
 
-            // 3. Post-Processing for MapComponent.svelte
-            // MapComponent expects: 'layer' (metro/tram), 'color' (for metro)
-            
+            // 1. Determine Layer
             let layer = null;
-            if (p.route === 'subway' || p.route === 'light_rail') layer = 'metro';
-            else if (p.route === 'tram') layer = 'tram';
+            if (route === 'subway' || route === 'light_rail') layer = 'metro';
+            else if (route === 'tram') layer = 'tram';
+            else if (route === 'bus') layer = 'bus';
             
             if (!layer) continue;
-            
+
+            // 2. Filter Logic
+            if (layer === 'metro' || layer === 'tram') {
+                // Tram/Metro: Strict Whitelist (Fixes Den Hague leakage)
+                if (!p.ref || !WHITELIST_TRAM_METRO.has(ref)) continue;
+                if (p.operator && p.operator.includes('HTM')) continue;
+            } 
+            else if (layer === 'bus') {
+                // Bus: Strict Operator Check (Fixes random buses)
+                // Must be RET.
+                const op = (p.operator || '').toUpperCase();
+                // Allow "RET", "Rotterdam...", "Stichting...", but generally RET is standard tag.
+                if (op !== 'RET' && !op.includes('ROTTERDAMSE ELEKTRISCHE')) {
+                     // Check network tag as fallback
+                     const net = (p.network || '').toUpperCase();
+                     if (net !== 'RET' && !net.includes('ROTTERDAM')) continue;
+                }
+            }
+
             p.layer = layer;
 
-            // Assign Colors
+            // 3. Assign Colors
             if (layer === 'metro') {
                 p.color = METRO_COLORS[ref] || '#000000'; 
             }
-            
-            // 4. Simplify Properties (Speed Optimization)
-            // Remove huge usage of tags we don't render
+            // Trams get purple in Svelte.
+            // Buses get grey in Svelte.
+
+            // 4. Cleanup
             const keepProps = {
                 'layer': p.layer,
                 'ref': p.ref,
@@ -133,7 +137,6 @@ async function main() {
 
         console.log(`Filtered and Processed ${initialCount} -> ${geojson.features.length} features.`);
         console.log(`Writing to ${OUTPUT_FILE}`);
-        // Minify output (no spaces/indentation) for faster loading
         fs.writeFileSync(OUTPUT_FILE, JSON.stringify(geojson));
         console.log("Done.");
 
