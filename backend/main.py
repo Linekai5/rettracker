@@ -49,7 +49,7 @@ async def vehicle_worker():
     global current_vehicles
     
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-    async with httpx.AsyncClient(verify=False, timeout=10.0, limits=limits) as client:
+    async with httpx.AsyncClient(verify=False, timeout=10.0, limits=limits, headers={"User-Agent": "RETTracker/1.0"}) as client:
         while True:
             start_time = time.time()
             new_vehicles = {}
@@ -121,7 +121,7 @@ async def stop_worker():
     global current_stops
     
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-    async with httpx.AsyncClient(verify=False, timeout=15.0, limits=limits) as client:
+    async with httpx.AsyncClient(verify=False, timeout=15.0, limits=limits, headers={"User-Agent": "RETTracker/1.0"}) as client:
         while True:
             start_time = time.time()
             new_stops = {} # map: stop_id -> { id: stop_id, departures: [] }
