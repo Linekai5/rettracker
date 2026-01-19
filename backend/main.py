@@ -6,6 +6,7 @@ import httpx
 import asyncio
 import json
 import time
+import math
 
 # --- Configuration ---
 # Vehicles update often (locations)
@@ -44,6 +45,24 @@ def is_ret_entity(entity):
     # From inspection: id: "2026-01-19:RET:M007:186099"
     return AGENCY_FILTER in entity.id
 
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """
+    Calculate the great circle distance between two points 
+    on the earth (specified in decimal degrees) in meters.
+    """
+    R = 6371000  # Radius of Earth in meters
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    
+    a = math.sin(delta_phi / 2.0) ** 2 + \
+        math.cos(phi1) * math.cos(phi2) * \
+        math.sin(delta_lambda / 2.0) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    
+    return R * c
+
 async def vehicle_worker():
     """Fetches VehiclePositions and broadcasts updates."""
     global current_vehicles
@@ -72,16 +91,37 @@ async def vehicle_worker():
                     # If label is available, use it as a display number, else fallback
                     label = v.vehicle.label if v.vehicle.label else v_id.split(':')[-1]
                     
+                    # Speed calculation logic
+                    lat = pos.latitude
+                    lon = pos.longitude
+                    # Use provided timestamp or fallback to server time
+                    ts = v.timestamp if v.timestamp else int(time.time())
+
+                    speed = 0.0
+                    if pos.HasField('speed'):
+                        speed = pos.speed
+                    elif v_id in current_vehicles:
+                        # Calculate speed manually if missing
+                        prev_v = current_vehicles[v_id]
+                        prev_lat = prev_v["lat"]
+                        prev_lon = prev_v["lon"]
+                        prev_ts = prev_v["timestamp"]
+                        
+                        time_diff = ts - prev_ts
+                        if time_diff > 0:
+                            dist = haversine_distance(prev_lat, prev_lon, lat, lon)
+                            speed = dist / time_diff
+
                     vehicle_data = {
                         "id": v_id,
                         "label": label,
-                        "lat": round(pos.latitude, 6),
-                        "lon": round(pos.longitude, 6),
+                        "lat": round(lat, 6),
+                        "lon": round(lon, 6),
                         "bearing": round(pos.bearing, 1) if pos.HasField('bearing') else 0,
-                        "speed": round(pos.speed, 1) if pos.HasField('speed') else 0,
+                        "speed": round(speed, 1),
                         "trip_id": v.trip.trip_id,
                         "route_id": v.trip.route_id,
-                        "timestamp": v.timestamp
+                        "timestamp": ts
                     }
                     
                     new_vehicles[v_id] = vehicle_data
