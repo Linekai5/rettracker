@@ -2,23 +2,20 @@
   import { onMount, onDestroy } from 'svelte';
   import { initMap } from './map.js';
   import { browser } from '$app/environment';
+  import { Vehicle } from './Vehicle.js';
   import retData from '$lib/assets/ret_network.json';
 
   let mapElement;
   let map;
   let evtSource;
-  const vehicleState = new Map();
+  const vehicleState = new Map(); // Map<id, Vehicle>
 
-  function updateVehicleSource() {
-      if (!map || !map.getSource('live-vehicles')) return;
-      const features = Array.from(vehicleState.values());
-      map.getSource('live-vehicles').setData({
-          type: 'FeatureCollection',
-          features: features
-      });
-  }
+  async function startVehicleStream() {
+      // Ensure library is loaded for Vehicle class
+      const maplibreModule = await import('maplibre-gl');
+      const maplibregl = maplibreModule.default || maplibreModule;
+      Vehicle.injectLibrary(maplibregl);
 
-  function startVehicleStream() {
       // If dev, might want localhost, but user set VITE_API_URL in .env
       const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
       const url = `${baseUrl}/vehicles-sse`;
@@ -34,22 +31,18 @@
           try {
               const payload = JSON.parse(e.data);
               if (payload.type === 'vehicles') {
-                  payload.data.forEach(v => {
-                      vehicleState.set(v.id, {
-                          type: 'Feature',
-                          geometry: {
-                              type: 'Point',
-                              coordinates: [v.lon, v.lat]
-                          },
-                          properties: {
-                              id: v.id,
-                              rotation: v.bearing, // MapLibre uses 'icon-rotate' or similar, strict GeoJSON props
-                              route_id: v.route_id,
-                              speed: v.speed
-                          }
-                      });
+                  // Payload data is a list of vehicles
+                  // We process each one
+                  payload.data.forEach(vData => {
+                      if (vehicleState.has(vData.id)) {
+                          // Update existing
+                          vehicleState.get(vData.id).update(vData);
+                      } else {
+                          // Create new
+                          const v = new Vehicle(vData, map);
+                          vehicleState.set(vData.id, v);
+                      }
                   });
-                  updateVehicleSource();
               }
           } catch (err) {
               console.error("Error parsing SSE", err);
@@ -58,7 +51,6 @@
 
       evtSource.onerror = (err) => {
           console.error("SSE Error:", err);
-          // Optional: Reconnect logic is naturally handled by EventSource usually, but strict error handling depends on browser
       };
   }
 
@@ -71,9 +63,6 @@
        // --- BASE LAYERS (Static) ---
        map.addSource('ret-data', { type: 'geojson', data: retData });
        
-       // --- LIVE SOURCE ---
-       map.addSource('live-vehicles', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-
        // 1. Bus Layer
        map.addLayer({
          id: 'ret-bus', type: 'line', source: 'ret-data',
@@ -141,17 +130,9 @@
      if (evtSource) {
          evtSource.close();
      }
-     if (browser && map) {
-        map.remove();
-     }
-  });
-</script>
-
-<div bind:this={mapElement} class="map-container"></div>
-
-<style>
-  .map-container {
-    width: 100%;
+     vehicleState.forEach(v => v.remove());
+     vehicleState.clear();
+dth: 100%;
     height: 100%;
     position: absolute;
     top: 0;
