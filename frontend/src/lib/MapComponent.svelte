@@ -100,7 +100,7 @@
       // const url = `${baseUrl}/vehicles-sse`;
       
       // HARDCODED FIX as requested: Point directly to the production backend
-      const url = 'https://ret-tram.dfelix.systems/vehicles-sse';
+      const url = 'https://rettrack.dfelix.systems/vehicles-sse';
       
       console.log("Connecting to SSE:", url);
 
