@@ -4,11 +4,75 @@
   import { browser } from '$app/environment';
   import { Vehicle } from './Vehicle.js';
   import retData from '$lib/assets/ret_network.json';
+  import * as turf from '@turf/turf';
 
   let mapElement;
   let map;
   let evtSource;
   const vehicleState = new Map(); // Map<id, Vehicle>
+  const routeGeometries = {}; // route_id -> MultiLineString
+
+  // Mapping from internal RET Metro lineage to public identifiers
+  const METRO_MAPPING = {
+      "M006": "E",
+      "M007": "C",
+      "M008": "A",
+      "M009": "B",
+      "M010": "D"
+  };
+
+  function resolveGeometry(vData) {
+      const rid = vData.route_id || "";
+      const hint = vData.line_hint || "";
+      
+      // Priority 0: Metro Internal Code Mapping
+      if (METRO_MAPPING[hint] && routeGeometries[METRO_MAPPING[hint]]) {
+          return routeGeometries[METRO_MAPPING[hint]];
+      }
+      // Priority 1: Exact Match on Line Hint (e.g. "33" -> "33")
+      if (hint && routeGeometries[hint]) {
+          return routeGeometries[hint];
+      }
+      // Priority 2: Exact Match on Route ID
+      if (routeGeometries[rid]) {
+          return routeGeometries[rid];
+      }
+      
+      // Priority 3: Fuzzy / Fallback via Spatial Discovery
+      let minDist = Infinity;
+      let bestRef = null;
+      
+      // Only do expensive spatial search if we have valid coordinates
+      if (vData.lat && vData.lon && Math.abs(vData.lat) > 1) {
+           const vPt = [vData.lon, vData.lat];
+           for (const [ref, geom] of Object.entries(routeGeometries)) {
+               const snapped = turf.nearestPointOnLine(geom, vPt);
+               if (snapped && snapped.properties && snapped.properties.dist !== undefined) {
+                   if (snapped.properties.dist < minDist) {
+                       minDist = snapped.properties.dist;
+                       bestRef = ref;
+                   }
+               }
+           }
+      }
+      
+      // Threshold: 0.1 km (100m) - slightly relaxed to catch drifts
+      if (bestRef && minDist < 0.1) {
+           return routeGeometries[bestRef];
+      } 
+      
+      // Fuzzy Name Fallback
+      for (const key of Object.keys(routeGeometries)) {
+          if (rid === key || rid.includes(key) || key.includes(rid)) {
+              if (Math.abs(rid.length - key.length) < 3) {
+                   return routeGeometries[key];
+              }
+          }
+      }
+      
+      return null;
+  }
+
 
   async function startVehicleStream() {
       // Ensure library is loaded for Vehicle class
@@ -16,8 +80,22 @@
       const maplibregl = maplibreModule.default || maplibreModule;
       Vehicle.injectLibrary(maplibregl);
 
+      // Process Routes
+      const featureGroups = {};
+      (retData.features || []).forEach(f => {
+          if (f.geometry && f.geometry.type === 'LineString' && f.properties && f.properties.ref) {
+              const ref = f.properties.ref;
+              if (!featureGroups[ref]) featureGroups[ref] = [];
+              featureGroups[ref].push(f.geometry.coordinates);
+          }
+      });
+      for (const [ref, coords] of Object.entries(featureGroups)) {
+          routeGeometries[ref] = turf.multiLineString(coords); // Create Turf Feature
+      }
+
       // If dev, might want localhost, but user set VITE_API_URL in .env
-      const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      // Default to empty string to allow Vite proxy to handle the request in dev
+      const baseUrl = import.meta.env.VITE_API_URL || '';
       const url = `${baseUrl}/vehicles-sse`;
       console.log("Connecting to SSE:", url);
 
@@ -36,10 +114,17 @@
                   payload.data.forEach(vData => {
                       if (vehicleState.has(vData.id)) {
                           // Update existing
-                          vehicleState.get(vData.id).update(vData);
+                          const v = vehicleState.get(vData.id);
+                          // Retry resolving geometry if missing (e.g. initial spawn was off-track)
+                          if (!v.hasRouteGeometry()) {
+                                const geom = resolveGeometry(vData);
+                                if (geom) v.setRouteGeometry(geom);
+                          }
+                          v.update(vData);
                       } else {
                           // Create new
-                          const v = new Vehicle(vData, map);
+                          const routeGeom = resolveGeometry(vData);
+                          const v = new Vehicle(vData, map, routeGeom);
                           vehicleState.set(vData.id, v);
                       }
                   });
@@ -108,17 +193,6 @@
            'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 14, 4],
            'circle-stroke-width': 1.5,
            'circle-stroke-color': '#000000',
-         }
-       });
-
-       // 5. Live Vehicles Layer
-       map.addLayer({
-         id: 'ret-vehicles', type: 'circle', source: 'live-vehicles',
-         paint: {
-           'circle-color': '#ff0000',
-           'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 14, 6],
-           'circle-stroke-width': 1,
-           'circle-stroke-color': '#ffffff',
          }
        });
        

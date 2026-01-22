@@ -1,4 +1,5 @@
 import gsap from 'gsap';
+import * as turf from '@turf/turf';
 
 let maplibregl = null;
 
@@ -18,15 +19,25 @@ export class Vehicle {
         maplibregl = lib;
     }
 
-    constructor(data, map) {
+    constructor(data, map, routeGeometry) {
         this.id = data.id;
         this.map = map;
+        this.routeGeometry = routeGeometry; // MultiLineString or LineString
+        
+        // Initial Snap
+        let initialPos = [data.lon, data.lat];
+        if (this.routeGeometry) {
+             const snapped = turf.nearestPointOnLine(this.routeGeometry, initialPos);
+             if (snapped && snapped.geometry && snapped.geometry.coordinates) {
+                 initialPos = snapped.geometry.coordinates;
+             }
+        }
+        
         this.data = data;
         
         // State for animation
-        this.currentPos = { lat: data.lat, lon: data.lon };
-        this.currentBearing = data.bearing || 0;
-
+        this.currentPos = { lat: initialPos[1], lon: initialPos[0] };
+        
         // Create DOM element
         this.element = document.createElement('div');
         this.element.className = 'vehicle-marker';
@@ -41,10 +52,11 @@ export class Vehicle {
         this.setColor(this.getRouteColor(data.route_id));
 
         // Create Marker
+        // We use default rotationAlignment ('auto' -> 'viewport') to ensure the
+        // circle always faces the screen and stays centered on the coordinate.
+        // Rotation is removed because a circle has no visual direction.
         this.marker = new maplibregl.Marker({
-            element: this.element,
-            rotation: this.currentBearing,
-            rotationAlignment: 'map' // Rotates with the map
+            element: this.element
         })
         .setLngLat([data.lon, data.lat])
         .addTo(map);
@@ -98,12 +110,75 @@ export class Vehicle {
         this.element.style.height = `${size}px`;
     }
 
+    hasRouteGeometry() {
+        return !!this.routeGeometry;
+    }
+
+    setRouteGeometry(geometry) {
+        this.routeGeometry = geometry;
+        // Immediate snap to new geometry if possible
+        if (this.currentPos && this.currentPos.lat && this.currentPos.lon && this.routeGeometry) {
+             const snapped = turf.nearestPointOnLine(this.routeGeometry, [this.currentPos.lon, this.currentPos.lat]);
+             if (snapped && snapped.geometry && snapped.geometry.coordinates) {
+                 // Force update visuals immediately
+                 this.marker.setLngLat(snapped.geometry.coordinates);
+                 this.currentPos.lon = snapped.geometry.coordinates[0];
+                 this.currentPos.lat = snapped.geometry.coordinates[1];
+             }
+        }
+    }
+
     update(newData) {
+        // 1. FILTER INVALID COORDINATES
+        // If the backend sends 0,0, it's an error/lost signal. 
+        // Do not update position, do not animate. 
+        // Just update metadata (popup) or return.
+        if (!newData.lat || !newData.lon || (Math.abs(newData.lat) < 1 && Math.abs(newData.lon) < 1)) {
+            // Coordinate invalid.
+            // Only update popup content if we want, or just ignore.
+            // We can optionally hide the marker, but for now just ignoring the move is safer to avoid jumps.
+            return;
+        }
+
         // Update Internal Data
         this.data = newData;
 
+        // Snap Target
+        let targetLon = newData.lon;
+        let targetLat = newData.lat;
+        
+        // 2. SNAP CHECK
+        // If routeGeometry is available, snap the TARGET coordinate to the line.
+        if (this.routeGeometry) {
+             const snapped = turf.nearestPointOnLine(this.routeGeometry, [newData.lon, newData.lat]);
+             if (snapped && snapped.geometry && snapped.geometry.coordinates) {
+                 targetLon = snapped.geometry.coordinates[0];
+                 targetLat = snapped.geometry.coordinates[1];
+             }
+        }
+
+        // 3. CHECK FOR "POP IN" (Initial or Recovery)
+        // If currentPos is effectively 0,0 (initialized bad) OR distance is huge, 
+        // do not interpolate. Teleport instantly.
+        if (Math.abs(this.currentPos.lat) < 1 || Math.abs(this.currentPos.lon) < 1) {
+             this.currentPos.lat = targetLat;
+             this.currentPos.lon = targetLon;
+             this.marker.setLngLat([targetLon, targetLat]);
+             return; // No animation needed for instant pop-in
+        }
+
         // Calculate distance from current animated position to new target
-        const dist = this.getHaversineDistance(this.currentPos.lat, this.currentPos.lon, newData.lat, newData.lon);
+        const dist = this.getHaversineDistance(this.currentPos.lat, this.currentPos.lon, targetLat, targetLon);
+
+        // 4. ANIMATION LOGIC
+        // If distance is huge (>500m), it's a teleport/reset. Don't slide across map.
+        if (dist > 500) {
+             gsap.killTweensOf(this.currentPos);
+             this.currentPos.lat = targetLat;
+             this.currentPos.lon = targetLon;
+             this.marker.setLngLat([targetLon, targetLat]);
+             return;
+        }
         
         // Calculate duration based on speed (m/s)
         let duration = 2.0; 
@@ -112,6 +187,8 @@ export class Vehicle {
         // If we have a valid speed, use it to determine duration (distance / speed)
         if (speed > 0.1) {
             duration = dist / speed;
+            // Cap duration to avoid super slow drift if speed is remarkably low for distance
+            if (duration > 10.0) duration = 10.0; 
         } else if (dist > 50) {
              // Teleport or lost signal recovery
              duration = 2.0; 
@@ -119,36 +196,42 @@ export class Vehicle {
              // Stopped or very slow
              duration = 0.5; 
         }
+        
+        // Safety cap on duration against fetch interval
+        // If duration is too long compared to updates, we'll always lag.
+        // Assuming ~2s updates, allowing up to 3s smooths it out.
+        // But if speed says 30s, we should probably just move faster to catch up.
+        if (duration > 3.0) duration = 3.0;
 
         // Animate Position using calculated duration and linear ease for steady flow
         gsap.to(this.currentPos, {
-            lat: newData.lat,
-            lon: newData.lon,
+            lat: targetLat,
+            lon: targetLon,
             duration: duration, 
             ease: "none",
             onUpdate: () => {
-                this.marker.setLngLat([this.currentPos.lon, this.currentPos.lat]);
+                let displayLon = this.currentPos.lon;
+                let displayLat = this.currentPos.lat;
+
+                // Continuous Snap
+                // This ensures that even if the linear interpolation between A and B
+                // cuts a corner, we project the marker back onto the track for every frame.
+                if (this.routeGeometry) {
+                     // We snap the current animated position to the route line
+                     const snapped = turf.nearestPointOnLine(this.routeGeometry, [displayLon, displayLat]);
+                     if (snapped && snapped.geometry && snapped.geometry.coordinates) {
+                         // Only apply continuous snap if reasonably close (e.g. < 50m)
+                         // optimizing for visual correctness without wild jumps if geometry is looped
+                         // But for now, strict snapping is requested.
+                         displayLon = snapped.geometry.coordinates[0];
+                         displayLat = snapped.geometry.coordinates[1];
+                     }
+                }
+                
+                this.marker.setLngLat([displayLon, displayLat]);
             }
         });
 
-        // Animate Bearing
-        if (newData.bearing !== undefined) {
-             const startBearing = this.currentBearing;
-             const endBearing = newData.bearing;
-             
-             // Simple bearing interpolation
-             const obj = { bearing: startBearing };
-             gsap.to(obj, {
-                 bearing: endBearing,
-                 duration: 1.0, 
-                 ease: "none",
-                 onUpdate: () => {
-                     this.marker.setRotation(obj.bearing);
-                 }
-             });
-             this.currentBearing = endBearing;
-        }
-        
         // Update Popup
         this.popup.setHTML(this.getPopupContent(newData));
     }

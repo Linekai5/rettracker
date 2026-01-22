@@ -97,6 +97,13 @@ async def vehicle_worker():
                     lon = pos.longitude
                     # Use provided timestamp or fallback to server time
                     ts = v.timestamp if v.timestamp else int(time.time())
+                    
+                    # Extract Line Hint from ID (e.g. "RET:33:..." -> "33")
+                    # Format: date:AGENCY:LINE:VEHICLE
+                    parts = v_id.split(':')
+                    line_hint = ""
+                    if len(parts) >= 3 and parts[1] == "RET":
+                        line_hint = parts[2]
 
                     speed = 0.0
                     
@@ -130,6 +137,7 @@ async def vehicle_worker():
                         "speed": round(speed, 1),
                         "trip_id": v.trip.trip_id,
                         "route_id": v.trip.route_id,
+                        "line_hint": line_hint,
                         "timestamp": ts
                     }
                     
@@ -271,7 +279,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"], # Allow all for dev container environment
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -31,8 +31,6 @@
   height: 100%;
   z-index: 0;
   background-color: #04142a; /* match dark map tiles to avoid white flash */
-  /* Add padding-top to prevent map from being hidden under navbar */
-  padding-top: 60px;
 }
 
 /* Remove blue focus border from map and its children */
