@@ -96,8 +96,12 @@
       // If dev, might want localhost, but user set VITE_API_URL in .env
       // Default to empty string to allow Vite proxy to handle the request in dev
       // UPDATED: Pointing to backend explicitly to avoid 404s
-      const baseUrl = import.meta.env.VITE_API_URL || 'https://ret-tram.dfelix.systems';
-      const url = `${baseUrl}/vehicles-sse`;
+      // const baseUrl = import.meta.env.VITE_API_URL || 'https://ret-tram.dfelix.systems';
+      // const url = `${baseUrl}/vehicles-sse`;
+      
+      // HARDCODED FIX as requested: Point directly to the production backend
+      const url = 'https://ret-tram.dfelix.systems/vehicles-sse';
+      
       console.log("Connecting to SSE:", url);
 
       evtSource = new EventSource(url);
