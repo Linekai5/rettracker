@@ -285,6 +285,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+def health_check():
+    return {"status": "ok", "message": "Backend is running and CORS is configured open."}
+
+
 @app.get("/vehicles-sse")
 async def vehicles_sse(request: Request):
     async def event_generator():
