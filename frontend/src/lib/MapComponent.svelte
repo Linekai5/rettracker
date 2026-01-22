@@ -6,6 +6,61 @@
 
   let mapElement;
   let map;
+  let evtSource;
+  const vehicleState = new Map();
+
+  function updateVehicleSource() {
+      if (!map || !map.getSource('live-vehicles')) return;
+      const features = Array.from(vehicleState.values());
+      map.getSource('live-vehicles').setData({
+          type: 'FeatureCollection',
+          features: features
+      });
+  }
+
+  function startVehicleStream() {
+      // If dev, might want localhost, but user set VITE_API_URL in .env
+      const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const url = `${baseUrl}/vehicles-sse`;
+      console.log("Connecting to SSE:", url);
+
+      evtSource = new EventSource(url);
+      
+      evtSource.onopen = () => {
+          console.log("SSE Connection established successfully.");
+      };
+      
+      evtSource.onmessage = (e) => {
+          try {
+              const payload = JSON.parse(e.data);
+              if (payload.type === 'vehicles') {
+                  payload.data.forEach(v => {
+                      vehicleState.set(v.id, {
+                          type: 'Feature',
+                          geometry: {
+                              type: 'Point',
+                              coordinates: [v.lon, v.lat]
+                          },
+                          properties: {
+                              id: v.id,
+                              rotation: v.bearing, // MapLibre uses 'icon-rotate' or similar, strict GeoJSON props
+                              route_id: v.route_id,
+                              speed: v.speed
+                          }
+                      });
+                  });
+                  updateVehicleSource();
+              }
+          } catch (err) {
+              console.error("Error parsing SSE", err);
+          }
+      };
+
+      evtSource.onerror = (err) => {
+          console.error("SSE Error:", err);
+          // Optional: Reconnect logic is naturally handled by EventSource usually, but strict error handling depends on browser
+      };
+  }
 
   onMount(async () => {
     if (!browser) return;
@@ -15,6 +70,9 @@
     map.on('load', () => {
        // --- BASE LAYERS (Static) ---
        map.addSource('ret-data', { type: 'geojson', data: retData });
+       
+       // --- LIVE SOURCE ---
+       map.addSource('live-vehicles', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
 
        // 1. Bus Layer
        map.addLayer({
@@ -63,10 +121,26 @@
            'circle-stroke-color': '#000000',
          }
        });
+
+       // 5. Live Vehicles Layer
+       map.addLayer({
+         id: 'ret-vehicles', type: 'circle', source: 'live-vehicles',
+         paint: {
+           'circle-color': '#ff0000',
+           'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 14, 6],
+           'circle-stroke-width': 1,
+           'circle-stroke-color': '#ffffff',
+         }
+       });
+       
+       startVehicleStream();
     });
   });
 
   onDestroy(() => {
+     if (evtSource) {
+         evtSource.close();
+     }
      if (browser && map) {
         map.remove();
      }

@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
 from google.transit import gtfs_realtime_pb2
@@ -257,7 +258,24 @@ async def lifespan(app: FastAPI):
     t1.cancel()
     t2.cancel()
 
+
 app = FastAPI(lifespan=lifespan)
+
+# --- CORS Configuration ---
+origins = [
+    "https://www.rettracker.nl",
+    "https://rettracker.nl",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/vehicles-sse")
 async def vehicles_sse(request: Request):
@@ -287,7 +305,6 @@ async def vehicles_sse(request: Request):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
         },
     )
 
@@ -323,8 +340,7 @@ async def stops_sse(request: Request):
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
             "Access-Control-Allow-Origin": "*",
-        },
-    )
+        
 
 @app.get("/")
 async def root():
