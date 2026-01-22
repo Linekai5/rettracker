@@ -79,10 +79,11 @@ export class Vehicle {
     }
 
     getPopupContent(data) {
+        const speedKmh = Math.round((data.speed || 0) * 3.6);
         return `
             <div style="color:black; font-family:sans-serif; font-size:12px;">
                 <strong>Route ${data.route_id}</strong><br>
-                Speed: ${data.speed} km/h<br>
+                Speed: ${speedKmh} km/h<br>
                 Vehicle: ${data.label || data.id}
             </div>
         `;
@@ -100,37 +101,47 @@ export class Vehicle {
     update(newData) {
         // Update Internal Data
         this.data = newData;
+
+        // Calculate distance from current animated position to new target
+        const dist = this.getHaversineDistance(this.currentPos.lat, this.currentPos.lon, newData.lat, newData.lon);
         
-        // Animate Position (Lat/Lon)
+        // Calculate duration based on speed (m/s)
+        let duration = 2.0; 
+        const speed = newData.speed || 0;
+        
+        // If we have a valid speed, use it to determine duration (distance / speed)
+        if (speed > 0.1) {
+            duration = dist / speed;
+        } else if (dist > 50) {
+             // Teleport or lost signal recovery
+             duration = 2.0; 
+        } else {
+             // Stopped or very slow
+             duration = 0.5; 
+        }
+
+        // Animate Position using calculated duration and linear ease for steady flow
         gsap.to(this.currentPos, {
             lat: newData.lat,
             lon: newData.lon,
-            duration: 2.0, // Matches standard fetch interval roughly
-            ease: "power1.inOut",
+            duration: duration, 
+            ease: "none",
             onUpdate: () => {
                 this.marker.setLngLat([this.currentPos.lon, this.currentPos.lat]);
             }
         });
 
-        // Animate Bearing (handle 350 -> 10 wraparound if needed, but keeping simple for now)
+        // Animate Bearing
         if (newData.bearing !== undefined) {
-             gsap.to(this.marker.getElement(), {
-                 rotation: newData.bearing,  // This might need specific CSS construct for marker rotation if marker module doesn't handle it during setRotation
-                 duration: 1.0 
-             });
-             // MapLibre marker setRotation is instant, GSAP rotating the element style transform is separate.
-             // Best to interpolate the value and call setRotation.
-             
-             // Simple bearing interpolation
              const startBearing = this.currentBearing;
              const endBearing = newData.bearing;
              
-             // Shortest path rotation logic could go here
-             
+             // Simple bearing interpolation
              const obj = { bearing: startBearing };
              gsap.to(obj, {
                  bearing: endBearing,
-                 duration: 1.0,
+                 duration: 1.0, 
+                 ease: "none",
                  onUpdate: () => {
                      this.marker.setRotation(obj.bearing);
                  }
@@ -140,6 +151,17 @@ export class Vehicle {
         
         // Update Popup
         this.popup.setHTML(this.getPopupContent(newData));
+    }
+
+    getHaversineDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371000; // Earth radius in meters
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                  Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                  Math.sin(dLon/2) * Math.sin(dLon/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        return R * c;
     }
 
     remove() {
