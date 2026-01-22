@@ -339,8 +339,8 @@ async def stops_sse(request: Request):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
-        
+        },
+    )
 
 @app.get("/")
 async def root():
