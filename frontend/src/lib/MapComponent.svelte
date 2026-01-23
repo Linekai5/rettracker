@@ -75,33 +75,8 @@
 
 
   async function startVehicleStream() {
-      // Ensure library is loaded for Vehicle class
-      const maplibreModule = await import('maplibre-gl');
-      const maplibregl = maplibreModule.default || maplibreModule;
-      Vehicle.injectLibrary(maplibregl);
-
-      // Process Routes
-      const featureGroups = {};
-      (retData.features || []).forEach(f => {
-          if (f.geometry && f.geometry.type === 'LineString' && f.properties && f.properties.ref) {
-              const ref = f.properties.ref;
-              if (!featureGroups[ref]) featureGroups[ref] = [];
-              featureGroups[ref].push(f.geometry.coordinates);
-          }
-      });
-      for (const [ref, coords] of Object.entries(featureGroups)) {
-          routeGeometries[ref] = turf.multiLineString(coords); // Create Turf Feature
-      }
-
-      // If dev, might want localhost, but user set VITE_API_URL in .env
-      // Default to empty string to allow Vite proxy to handle the request in dev
-      // UPDATED: Pointing to backend explicitly to avoid 404s
-      // const baseUrl = import.meta.env.VITE_API_URL || 'https://ret-tram.dfelix.systems';
-      // const url = `${baseUrl}/vehicles-sse`;
-      
-      // HARDCODED FIX as requested: Point directly to the production backend
+      // Create SSE Connection
       const url = 'https://rettrack.dfelix.systems/vehicles-sse';
-      
       console.log("Connecting to SSE:", url);
 
       evtSource = new EventSource(url);
@@ -114,20 +89,15 @@
           try {
               const payload = JSON.parse(e.data);
               if (payload.type === 'vehicles') {
-                  // Payload data is a list of vehicles
-                  // We process each one
                   payload.data.forEach(vData => {
                       if (vehicleState.has(vData.id)) {
-                          // Update existing
                           const v = vehicleState.get(vData.id);
-                          // Retry resolving geometry if missing (e.g. initial spawn was off-track)
                           if (!v.hasRouteGeometry()) {
                                 const geom = resolveGeometry(vData);
                                 if (geom) v.setRouteGeometry(geom);
                           }
                           v.update(vData);
                       } else {
-                          // Create new
                           const routeGeom = resolveGeometry(vData);
                           const v = new Vehicle(vData, map, routeGeom);
                           vehicleState.set(vData.id, v);
@@ -147,62 +117,35 @@
   onMount(async () => {
     if (!browser) return;
 
-    map = await initMap(mapElement);
-
-    map.on('load', () => {
-       // --- BASE LAYERS (Static) ---
-       map.addSource('ret-data', { type: 'geojson', data: retData });
-       
-       // 1. Bus Layer
-       map.addLayer({
-         id: 'ret-bus', type: 'line', source: 'ret-data',
-         filter: ['==', 'layer', 'bus'],
-         layout: { 'line-join': 'round', 'line-cap': 'round' },
-         paint: {
-           'line-color': '#D3D3D3', 
-           'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 14, 1.5],
-           'line-opacity': 0.6
-         }
-       });
-
-       // 2. Tram Layer
-       map.addLayer({
-         id: 'ret-tram', type: 'line', source: 'ret-data',
-         filter: ['==', 'layer', 'tram'],
-         layout: { 'line-join': 'round', 'line-cap': 'round' },
-         paint: {
-           'line-color': '#D100AA',
-           'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 14, 1.5],
-           'line-opacity': 0.9
-         }
-       });
-
-       // 3. Metro Layer
-       map.addLayer({
-         id: 'ret-metro', type: 'line', source: 'ret-data',
-         filter: ['==', 'layer', 'metro'],
-         layout: { 'line-join': 'round', 'line-cap': 'round' },
-         paint: {
-           'line-color': ['get', 'color'],
-           'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.5, 14, 3],
-           'line-opacity': 1.0
-         }
-       });
-
-       // 4. Stops Layer
-       map.addLayer({
-         id: 'ret-stops', type: 'circle', source: 'ret-data',
-         filter: ['has', 'isStop'],
-         paint: {
-           'circle-color': '#ffffff',
-           'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 14, 4],
-           'circle-stroke-width': 1.5,
-           'circle-stroke-color': '#000000',
-         }
-       });
-       
-       startVehicleStream();
+    // 1. Pre-calculate Route Geometries (CPU Task)
+    // Doing this synchronously before map init ensures lookups are ready immediately.
+    const featureGroups = {};
+    (retData.features || []).forEach(f => {
+        if (f.geometry && f.geometry.type === 'LineString' && f.properties && f.properties.ref) {
+            const ref = f.properties.ref;
+            if (!featureGroups[ref]) featureGroups[ref] = [];
+            featureGroups[ref].push(f.geometry.coordinates);
+        }
     });
+    for (const [ref, coords] of Object.entries(featureGroups)) {
+        routeGeometries[ref] = turf.multiLineString(coords);
+    }
+
+    // 2. Initialize Map with Data (Critical Path Rendering)
+    // Passing retData allows initMap to bake layers into the style spec, 
+    // rendering lines instantly on init without waiting for 'load' event.
+    map = await initMap(mapElement, retData);
+
+    // 3. Inject Dependencies for Vehicles
+    // Re-import maplibre to pass to Vehicle class (module is cached)
+    const maplibreModule = await import('maplibre-gl');
+    const maplibregl = maplibreModule.default || maplibreModule;
+    Vehicle.injectLibrary(maplibregl);
+
+    // 4. Start Stream Immediately
+    // Do NOT wait for map 'load' event. API data should flow + markers create ASAP.
+    // MapLibre handles DOM markers even if tiles aren't fully painted.
+    startVehicleStream();
   });
 
   onDestroy(() => {
