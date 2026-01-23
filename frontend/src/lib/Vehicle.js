@@ -11,6 +11,14 @@ const METRO_COLORS = {
     'E': '#003e83'  // Dark Blue
 };
 
+const METRO_MAPPING = {
+    "M006": "E",
+    "M007": "C",
+    "M008": "A",
+    "M009": "B",
+    "M010": "D"
+};
+
 const TRAM_COLOR = '#D100AA';
 const BUS_COLOR = '#808080'; // Darker grey for visibility
 
@@ -72,31 +80,76 @@ export class Vehicle {
     getRouteColor(routeId) {
         if (!routeId) return BUS_COLOR;
         
-        // Check for Metro (A, B, C, D, E)
-        // routeId might be "Line A" or just "A" or similar. 
-        // Assuming simplistic check for now based on RET patterns.
+        // 1. Check Metro Mapping
+        const mapped = METRO_MAPPING[routeId] || METRO_MAPPING[routeId.toUpperCase()];
+        if (mapped && METRO_COLORS[mapped]) {
+            return METRO_COLORS[mapped];
+        }
+
+        // 2. Fallback check for "Line A", "A", etc.
         const upper = routeId.toUpperCase();
         for (const [line, color] of Object.entries(METRO_COLORS)) {
-            if (upper.includes(line) && upper.length < 3) { // rudimentary check specifically for A-E
+            // Avoid matching "123" with "A" or similar weirdness, assume lines are single letters or "Metro X"
+            if (upper === line || upper === `METRO ${line}`) { 
                  return color;
             }
         }
 
-        // Trams usually numeric 1-25
-        if (!isNaN(parseInt(routeId))) {
-             return TRAM_COLOR;
+        // Trams usually numeric 1-25. 
+        // We assume anything purely numeric < 100 is likely a Tram in RET (usually), BUT buses also have numbers.
+        // RET Trams: 2, 4, 7, 8, 20, 21, 23, 24, 25.
+        // RET Buses: 30+, 100+, etc.
+        const num = parseInt(routeId);
+        if (!isNaN(num)) {
+             if (num < 30) return TRAM_COLOR; // Heuristic for Tram
+             return BUS_COLOR; // Heuristic for Bus
         }
 
         return BUS_COLOR;
     }
 
     getPopupContent(data) {
-        const speedKmh = Math.round((data.speed || 0) * 3.6);
+        // --- Speed Calculation & Sanity Check ---
+        let speedKmh = Math.round((data.speed || 0) * 3.6);
+        // If speed is unreasonably high (e.g. > 130km/h), show N/A or cap it.
+        // RET Metros max ~100km/h.
+        if (speedKmh > 130) {
+            speedKmh = "N/A"; // Likely a GPS jump or glitch
+        } else {
+            speedKmh = `${speedKmh} km/h`;
+        }
+
+        // --- Determine Vehicle Type & Label ---
+        let type = "Bus"; 
+        let label = data.line_hint || data.route_id; // Default to hint or route ID
+
+        // Check Metro
+        let metroLetter = METRO_MAPPING[data.route_id] || METRO_MAPPING[label];
+        if (metroLetter) {
+            type = "Metro";
+            label = metroLetter;
+        } else if (label && !isNaN(parseInt(label))) {
+            const num = parseInt(label);
+            if (num < 30) {
+                type = "Tram";
+            } else {
+                type = "Bus";
+            }
+        }
+
+        // --- Construct Display String ---
+        // "Metro E", "Tram 25", "Bus 38"
+        const displayTitle = `${type} ${label}`;
+        const vehicleNum = data.label || data.id;
+
         return `
-            <div style="color:black; font-family:sans-serif; font-size:12px;">
-                <strong>Route ${data.route_id}</strong><br>
-                Speed: ${speedKmh} km/h<br>
-                Vehicle: ${data.label || data.id}
+            <div style="color:black; font-family:sans-serif; font-size:13px; min-width:120px; padding:5px;">
+                <div style="font-weight:bold; font-size:14px; margin-bottom:4px; border-bottom:1px solid #ccc; padding-bottom:2px;">
+                    ${displayTitle}
+                </div>
+                <!-- <div style="font-style:italic; color:#555; margin-bottom:4px;">To: ${data.headsign || "Unknown Terminus"}</div> -->
+                <div>Speed: <strong>${speedKmh}</strong></div>
+                <div style="color:#666; font-size:11px; margin-top:4px;">Veh #: ${vehicleNum}</div>
             </div>
         `;
     }

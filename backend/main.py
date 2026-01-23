@@ -128,6 +128,12 @@ async def vehicle_worker():
                     if pos.HasField('speed') and pos.speed > 0:
                         speed = pos.speed
 
+                    # SAFETY CLAMP: 
+                    # If calculated or fed speed is absurd (> 130 km/h = ~36 m/s), 
+                    # it's likely a GPS error or distance jump. Reset to 0 or clamp.
+                    if speed > 36.0: 
+                        speed = 0.0
+
                     vehicle_data = {
                         "id": v_id,
                         "label": label,
