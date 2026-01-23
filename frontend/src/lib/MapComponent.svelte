@@ -3,7 +3,8 @@
   import { initMap } from './map.js';
   import { browser } from '$app/environment';
   import { Vehicle } from './Vehicle.js';
-  import retData from '$lib/assets/ret_network.json';
+  // Removed direct import to avoid bundling 2.4MB JSON
+  // import retData from '$lib/assets/ret_network.json';
   import * as turf from '@turf/turf';
 
   let mapElement;
@@ -117,35 +118,105 @@
   onMount(async () => {
     if (!browser) return;
 
-    // 1. Pre-calculate Route Geometries (CPU Task)
-    // Doing this synchronously before map init ensures lookups are ready immediately.
-    const featureGroups = {};
-    (retData.features || []).forEach(f => {
-        if (f.geometry && f.geometry.type === 'LineString' && f.properties && f.properties.ref) {
-            const ref = f.properties.ref;
-            if (!featureGroups[ref]) featureGroups[ref] = [];
-            featureGroups[ref].push(f.geometry.coordinates);
-        }
-    });
-    for (const [ref, coords] of Object.entries(featureGroups)) {
-        routeGeometries[ref] = turf.multiLineString(coords);
-    }
-
-    // 2. Initialize Map with Data (Critical Path Rendering)
-    // Passing retData allows initMap to bake layers into the style spec, 
-    // rendering lines instantly on init without waiting for 'load' event.
-    map = await initMap(mapElement, retData);
-
-    // 3. Inject Dependencies for Vehicles
-    // Re-import maplibre to pass to Vehicle class (module is cached)
+    // 1. Initialize Map Immediately (Zero Delay)
+    // We pass NO data so the map engine starts rendering base tiles instantly.
+    map = await initMap(mapElement);
+    
+    // 2. Inject Dependencies for Vehicles
+    // Re-import (cached) for Vehicle class usage
     const maplibreModule = await import('maplibre-gl');
     const maplibregl = maplibreModule.default || maplibreModule;
     Vehicle.injectLibrary(maplibregl);
 
-    // 4. Start Stream Immediately
-    // Do NOT wait for map 'load' event. API data should flow + markers create ASAP.
-    // MapLibre handles DOM markers even if tiles aren't fully painted.
-    startVehicleStream();
+    // 3. Parallel Fetch of Network Data (Async)
+    // Does not block the main thread or map rendering.
+    try {
+        const response = await fetch('/ret_network.json');
+        if (!response.ok) throw new Error('Network data missing');
+        const retData = await response.json();
+
+        // 4. Process Geometries for Snapping (Background CPU)
+        const featureGroups = {};
+        (retData.features || []).forEach(f => {
+            if (f.geometry && f.geometry.type === 'LineString' && f.properties && f.properties.ref) {
+                const ref = f.properties.ref;
+                if (!featureGroups[ref]) featureGroups[ref] = [];
+                featureGroups[ref].push(f.geometry.coordinates);
+            }
+        });
+        for (const [ref, coords] of Object.entries(featureGroups)) {
+            routeGeometries[ref] = turf.multiLineString(coords);
+        }
+
+        // 5. Add Lines to Map
+        // Wait for map style to be ready to accept layers
+        const addLayers = () => {
+             if (map.getSource('ret-data')) return; // Already added
+
+             map.addSource('ret-data', { type: 'geojson', data: retData });
+           
+             // 1. Bus Layer
+             map.addLayer({
+                id: 'ret-bus', type: 'line', source: 'ret-data',
+                filter: ['==', 'layer', 'bus'],
+                layout: { 'line-join': 'round', 'line-cap': 'round' },
+                paint: {
+                'line-color': '#D3D3D3', 
+                'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 14, 1.5],
+                'line-opacity': 0.6
+                }
+             });
+
+             // 2. Tram Layer
+             map.addLayer({
+                id: 'ret-tram', type: 'line', source: 'ret-data',
+                filter: ['==', 'layer', 'tram'],
+                layout: { 'line-join': 'round', 'line-cap': 'round' },
+                paint: {
+                'line-color': '#D100AA',
+                'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 14, 1.5],
+                'line-opacity': 0.9
+                }
+             });
+
+             // 3. Metro Layer
+             map.addLayer({
+                id: 'ret-metro', type: 'line', source: 'ret-data',
+                filter: ['==', 'layer', 'metro'],
+                layout: { 'line-join': 'round', 'line-cap': 'round' },
+                paint: {
+                'line-color': ['get', 'color'],
+                'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.5, 14, 3],
+                'line-opacity': 1.0
+                }
+             });
+
+             // 4. Stops Layer
+             map.addLayer({
+                id: 'ret-stops', type: 'circle', source: 'ret-data',
+                filter: ['has', 'isStop'],
+                paint: {
+                'circle-color': '#ffffff',
+                'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 14, 4],
+                'circle-stroke-width': 1.5,
+                'circle-stroke-color': '#000000',
+                }
+             });
+             
+             // 6. Start Live Vehicle Stream
+             // Lines are drawn, now populate vehicles.
+             startVehicleStream();
+        };
+
+        if (map.loaded()) {
+            addLayers();
+        } else {
+            map.on('load', addLayers);
+        }
+
+    } catch (err) {
+        console.error("Failed to load network geometry", err);
+    }
   });
 
   onDestroy(() => {

@@ -30,7 +30,7 @@
   width: 100%;
   height: 100%;
   z-index: 0;
-  background-color: #04142a; /* match dark map tiles to avoid white flash */
+  background-color: #222222; /* Neutral dark grey to match map tiles */
 }
 
 /* Remove blue focus border from map and its children */

@@ -1,4 +1,4 @@
-export async function initMap(mapElement, geoJsonData) {
+export async function initMap(mapElement) {
   const maplibreModule = await import('maplibre-gl');
   const maplibregl = maplibreModule.default || maplibreModule;
 
@@ -33,56 +33,6 @@ export async function initMap(mapElement, geoJsonData) {
       { id: 'base', type: 'raster', source: 'base', minzoom: 0, maxzoom: 22 }
     ]
   };
-
-  // Pre-inject GeoJSON data if provided (Critical Path Rendering)
-  if (geoJsonData) {
-      style.sources['ret-data'] = { type: 'geojson', data: geoJsonData };
-      
-      // 1. Bus Layer
-      style.layers.push({
-         id: 'ret-bus', type: 'line', source: 'ret-data',
-         filter: ['==', 'layer', 'bus'],
-         layout: { 'line-join': 'round', 'line-cap': 'round' },
-         paint: {
-           'line-color': '#D3D3D3', 
-           'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 14, 1.5],
-           'line-opacity': 0.6
-         }
-      });
-      // 2. Tram Layer
-      style.layers.push({
-         id: 'ret-tram', type: 'line', source: 'ret-data',
-         filter: ['==', 'layer', 'tram'],
-         layout: { 'line-join': 'round', 'line-cap': 'round' },
-         paint: {
-           'line-color': '#D100AA',
-           'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 14, 1.5],
-           'line-opacity': 0.9
-         }
-      });
-      // 3. Metro Layer
-      style.layers.push({
-         id: 'ret-metro', type: 'line', source: 'ret-data',
-         filter: ['==', 'layer', 'metro'],
-         layout: { 'line-join': 'round', 'line-cap': 'round' },
-         paint: {
-           'line-color': ['get', 'color'],
-           'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.5, 14, 3],
-           'line-opacity': 1.0
-         }
-      });
-      // 4. Stops Layer
-      style.layers.push({
-         id: 'ret-stops', type: 'circle', source: 'ret-data',
-         filter: ['has', 'isStop'],
-         paint: {
-           'circle-color': '#ffffff',
-           'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 14, 4],
-           'circle-stroke-width': 1.5,
-           'circle-stroke-color': '#000000',
-         }
-      });
-  }
 
   const map = new maplibregl.Map({
     container: mapElement,
