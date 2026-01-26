@@ -25,8 +25,7 @@ AGENCY_FILTER = "RET"
 # Explicitly: 1, 2, 3, 4, 5, 6, 7, 8, 11 (from user image)
 # Plus: 20, 21, 23, 24, 25 (Citroen/TramPlus lines)
 KNOWN_TRAM_LINES = {
-    "1", "2", "3", "4", "5", "6", "7", "8", "9", "11", 
-    "20", "21", "23", "24", "25"
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "11"
 }
 
 # Rotterdam Area Bounding Box (Approx)
