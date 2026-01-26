@@ -22,10 +22,9 @@ AGENCY_FILTER = "RET"
 
 # Known Active Tram Lines for Strict Detection
 # Updated to match user-verified list + known frequent lines
-# Explicitly: 1, 2, 3, 4, 5, 6, 7, 8, 11 (from user image)
-# Plus: 20, 21, 23, 24, 25 (Citroen/TramPlus lines)
+# Explicitly: 2, 4, 6, 7, 8, 20, 21, 23, 24, 25 (from user image)
 KNOWN_TRAM_LINES = {
-    "1", "2", "3", "4", "5", "6", "7", "8", "9", "11"
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"
 }
 
 # Rotterdam Area Bounding Box (Approx)

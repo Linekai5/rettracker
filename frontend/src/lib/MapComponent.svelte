@@ -289,23 +289,33 @@
         const retData = await networkPromise;
 
         // 5. Process Geometries for Snapping (Background CPU)
-        const featureGroups = {};
+        // Store geometries with their "Type" (Tram, Bus, Metro) to enable strict type-based snapping
+        const featureGroups = {}; // ref -> { coords: [], type: 'bus'|'tram'|'metro' }
+        
         (retData.features || []).forEach(f => {
             if (f.geometry && f.properties && f.properties.ref) {
                 const ref = f.properties.ref;
-                if (!featureGroups[ref]) featureGroups[ref] = [];
+                const layer = f.properties.layer || 'bus'; // Default to bus if unspecified
+                
+                if (!featureGroups[ref]) featureGroups[ref] = { coords: [], type: layer };
                 
                 if (f.geometry.type === 'LineString') {
-                    featureGroups[ref].push(f.geometry.coordinates);
+                    featureGroups[ref].coords.push(f.geometry.coordinates);
                 } else if (f.geometry.type === 'MultiLineString') {
                     f.geometry.coordinates.forEach(coords => {
-                        featureGroups[ref].push(coords);
+                        featureGroups[ref].coords.push(coords);
                     });
                 }
             }
         });
-        for (const [ref, coords] of Object.entries(featureGroups)) {
-            routeGeometries[ref] = turf.multiLineString(coords);
+        
+        // Convert to Turf Geometries with attached metadata about Type
+        for (const [ref, data] of Object.entries(featureGroups)) {
+            // routeGeometries[ref] is now an object { geom, type }
+            routeGeometries[ref] = {
+                geom: turf.multiLineString(data.coords),
+                type: data.type.toLowerCase() // 'bus', 'tram', 'metro'
+            };
         }
         console.log(`Loaded ${Object.keys(routeGeometries).length} route geometries for snapping.`);
 
