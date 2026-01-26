@@ -363,7 +363,6 @@
     } catch (err) {
         console.error("Failed to load network geometry", err);
         // Fallback: Start vehicles anyway
-        }
     }
   });
 
