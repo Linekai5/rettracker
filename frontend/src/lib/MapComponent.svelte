@@ -86,8 +86,8 @@
                }
           }
           
-          // Threshold: 0.1 km (100m) - slightly relaxed to catch drifts
-          if (bestRef && minDist < 0.1) {
+          // Threshold: 0.5 km (500m) - aggressive to ensure vehicles clip to the intended network
+          if (bestRef && minDist < 0.5) {
                found = routeGeometries[bestRef];
           } 
           
@@ -104,7 +104,9 @@
           }
       }
       
-      resolvedCache.set(cacheKey, found);
+      if (found) {
+        resolvedCache.set(cacheKey, found);
+      }
       return found;
   }
 
@@ -282,15 +284,23 @@
         // 5. Process Geometries for Snapping (Background CPU)
         const featureGroups = {};
         (retData.features || []).forEach(f => {
-            if (f.geometry && f.geometry.type === 'LineString' && f.properties && f.properties.ref) {
+            if (f.geometry && f.properties && f.properties.ref) {
                 const ref = f.properties.ref;
                 if (!featureGroups[ref]) featureGroups[ref] = [];
-                featureGroups[ref].push(f.geometry.coordinates);
+                
+                if (f.geometry.type === 'LineString') {
+                    featureGroups[ref].push(f.geometry.coordinates);
+                } else if (f.geometry.type === 'MultiLineString') {
+                    f.geometry.coordinates.forEach(coords => {
+                        featureGroups[ref].push(coords);
+                    });
+                }
             }
         });
         for (const [ref, coords] of Object.entries(featureGroups)) {
             routeGeometries[ref] = turf.multiLineString(coords);
         }
+        console.log(`Loaded ${Object.keys(routeGeometries).length} route geometries for snapping.`);
 
         // 6. Add Lines to Map
         const addLayers = (data) => {

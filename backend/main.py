@@ -138,10 +138,15 @@ async def vehicle_worker():
                     # 2. Check Route ID as fallback
                     if v_type == "bus" and v.trip.route_id:
                         rid = v.trip.route_id.upper()
+                        # Check for metro codes
                         if any(m in rid for m in ["METRO", "M006", "M007", "M008", "M009", "M010"]):
                             v_type = "metro"
-                        elif "TRAM" in rid:
+                        # Check for tram indicators or low numbers
+                        elif "TRAM" in rid or (rid.isdigit() and int(rid) < 30):
                             v_type = "tram"
+                        # Extra check for Metro letters
+                        elif rid in ["A", "B", "C", "D", "E"]:
+                            v_type = "metro"
 
                     speed = 0.0
                     if v_id in current_vehicles:
