@@ -91,9 +91,21 @@ export class Vehicle {
     }
 
     getRouteColor(routeId) {
+        // Priority: Use strict type from backend if available
+        if (this.data.type === 'tram') return TRAM_COLOR;
+        if (this.data.type === 'metro') {
+            // Further refine metro color by line letter
+            const rid = routeId || "";
+            const mapped = METRO_MAPPING[rid] || METRO_MAPPING[rid.toUpperCase()];
+            if (mapped && METRO_COLORS[mapped]) return METRO_COLORS[mapped];
+            // Fallback to generic metro blue if unknown line
+            return '#00a1de';
+        }
+        if (this.data.type === 'bus') return BUS_COLOR;
+
         if (!routeId) return BUS_COLOR;
         
-        // 1. Check Metro Mapping
+        // 1. Check Metro Mapping (Fallback)
         const mapped = METRO_MAPPING[routeId] || METRO_MAPPING[routeId.toUpperCase()];
         if (mapped && METRO_COLORS[mapped]) {
             return METRO_COLORS[mapped];

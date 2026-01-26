@@ -8,14 +8,31 @@ import asyncio
 import json
 import time
 import math
+import zmq
+import zmq.asyncio
+import gzip
 
 # --- Configuration ---
-# Vehicles update often (locations)
-FETCH_INTERVAL_VEHICLES = 2.0  
+# Vehicles update often (locations). Reduced to 1.0s for faster feel.
+FETCH_INTERVAL_VEHICLES = 1.0  
 # Stops update less often (ETAs)
 FETCH_INTERVAL_STOPS = 10.0
 # Only process entities with IDs containing this string
 AGENCY_FILTER = "RET"
+
+# Known Active Tram Lines for Strict Detection
+# Updated to match user-verified list + known frequent lines
+# Explicitly: 1, 2, 3, 4, 5, 6, 7, 8, 11 (from user image)
+# Plus: 20, 21, 23, 24, 25 (Citroen/TramPlus lines)
+KNOWN_TRAM_LINES = {
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "11", 
+    "20", "21", "23", "24", "25"
+}
+
+# Rotterdam Area Bounding Box (Approx)
+# Filter out GPS errors (0,0) or wild drifts
+bbox_min_lat, bbox_max_lat = 51.5, 52.3
+bbox_min_lon, bbox_max_lon = 3.8, 4.9
 
 # --- Global State ---
 # Map: vehicle_id -> { id, lat, lon, bearing, speed, trip_id, ... }
@@ -71,17 +88,30 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return R * c
 
 async def vehicle_worker():
-    """Fetches VehiclePositions and broadcasts updates."""
+    """Fetches VehiclePositions via ZeroMQ for ultra-low latency updates."""
     global current_vehicles, trip_headsigns
     
-    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-    async with httpx.AsyncClient(verify=False, timeout=10.0, limits=limits, headers={"User-Agent": "RETTracker/1.0"}) as client:
-        while True:
-            start_time = time.time()
-            new_vehicles = {}
-            updates_by_type = {"metro": [], "tram": [], "bus": []}
+    # Setup ZMQ Subscriber
+    ctx = zmq.asyncio.Context()
+    sock = ctx.socket(zmq.SUB)
+    # Standard NDOV-Loket PubSub endpoint (Best Effort)
+    sock.connect("tcp://pubsub.besteffort.ndovloket.nl:7658")
+    # Subscribe specifically to VehiclePositions
+    sock.setsockopt_string(zmq.SUBSCRIBE, "/GOVI/KV78/VehiclePositions")
+    
+    print("ZeroMQ Listener Active: tcp://pubsub.besteffort.ndovloket.nl:7658")
+
+    while True:
+        try:
+            # Receive multipart: [topic, gzip_data]
+            multipart = await sock.recv_multipart()
+            content = gzip.decompress(multipart[1])
             
-            feed = await fetch_gtfs_feed(client, "http://gtfs.ovapi.nl/new/vehiclePositions.pb")
+            feed = gtfs_realtime_pb2.FeedMessage()
+            feed.ParseFromString(content)
+            
+            updates_by_type = {"metro": [], "tram": [], "bus": []}
+            found_ret_entities = False
             
             if feed:
                 for entity in feed.entity:
@@ -90,24 +120,25 @@ async def vehicle_worker():
                     if not is_ret_entity(entity):
                         continue
                     
+                    found_ret_entities = True
                     v = entity.vehicle
                     pos = v.position
-                    
-                    # Core data required for checking
                     v_id = entity.id 
-                    # If label is available, use it as a display number, else fallback
                     label = v.vehicle.label if v.vehicle.label else v_id.split(':')[-1]
                     
-                    # Coordinate invalid filter
                     lat = pos.latitude
                     lon = pos.longitude
+                    
+                    # Basic 0,0 check
                     if not lat or not lon or (abs(lat) < 1 and abs(lon) < 1):
                         continue
+                    
+                    # Rotterdam Bounding Box Filter
+                    if not (bbox_min_lat <= lat <= bbox_max_lat and bbox_min_lon <= lon <= bbox_max_lon):
+                        continue
 
-                    # Use provided timestamp or fallback to server time
                     ts = v.timestamp if v.timestamp else int(time.time())
                     
-                    # Try to extract headsign/destination from tripUpdates feed mapping
                     headsign = trip_headsigns.get(v.trip.trip_id, "")
                     if not headsign:
                         try:
@@ -116,10 +147,7 @@ async def vehicle_worker():
                         except:
                             pass
                     
-                    # Determine Vehicle Type
                     v_type = "bus" # Default
-                    
-                    # Improved Line Hint extraction (handles both date:RET:LINE and RET:LINE)
                     parts = v_id.split(':')
                     line_hint = ""
                     if len(parts) >= 3:
@@ -128,25 +156,20 @@ async def vehicle_worker():
                     
                     if line_hint:
                         lh_upper = line_hint.upper()
-                        # RET Metros are usually A, B, C, D, E or M-prefixed
                         if lh_upper in ["A", "B", "C", "D", "E"] or lh_upper.startswith("M"):
                             v_type = "metro"
-                        # Trams are 2, 4, 7, 8, 20, 21, 23, 24, 25
-                        elif lh_upper.isdigit() and int(lh_upper) < 30:
+                        elif lh_upper in KNOWN_TRAM_LINES:
                             v_type = "tram"
                     
                     # 2. Check Route ID as fallback
                     if v_type == "bus" and v.trip.route_id:
                         rid = v.trip.route_id.upper()
-                        # Check for metro codes
                         if any(m in rid for m in ["METRO", "M006", "M007", "M008", "M009", "M010"]):
                             v_type = "metro"
-                        # Check for tram indicators or low numbers
-                        elif "TRAM" in rid or (rid.isdigit() and int(rid) < 30):
+                        elif "TRAM" in rid:
                             v_type = "tram"
-                        # Extra check for Metro letters
-                        elif rid in ["A", "B", "C", "D", "E"]:
-                            v_type = "metro"
+                        elif rid in KNOWN_TRAM_LINES:
+                            v_type = "tram"
 
                     speed = 0.0
                     if v_id in current_vehicles:
@@ -177,8 +200,6 @@ async def vehicle_worker():
                         "timestamp": ts
                     }
                     
-                    new_vehicles[v_id] = vehicle_data
-
                     # Diff Check
                     changed = True
                     if v_id in current_vehicles:
@@ -188,24 +209,32 @@ async def vehicle_worker():
                             old["bearing"] == vehicle_data["bearing"]):
                             changed = False
                     
+                    # Update Global State
+                    current_vehicles[v_id] = vehicle_data
+
                     if changed:
                         updates_by_type[v_type].append(vehicle_data)
 
-                # Update global state
-                current_vehicles = new_vehicles
+            # Cleanup Stale Vehicles (TTL 60s)
+            # This handles cases where vehicles disappear from the feed
+            now = time.time()
+            stale_keys = [k for k, v in current_vehicles.items() if (now - v['timestamp']) > 60]
+            for k in stale_keys:
+                del current_vehicles[k]
                 
-                # Broadcast specifically to categorical subscribers
-                for vt, items in updates_by_type.items():
-                    if items:
-                        msg = json.dumps({"type": "vehicles", "vehicle_type": vt, "data": items})
-                        for q in list(vehicle_subscribers[vt]):
-                            try:
-                                q.put_nowait(msg)
-                            except asyncio.QueueFull:
-                                pass
+            # Broadcast updates
+            for vt, items in updates_by_type.items():
+                if items:
+                    msg = json.dumps({"type": "vehicles", "vehicle_type": vt, "data": items})
+                    for q in list(vehicle_subscribers[vt]):
+                        try:
+                            q.put_nowait(msg)
+                        except asyncio.QueueFull:
+                            pass
 
-            elapsed = time.time() - start_time
-            await asyncio.sleep(max(0.1, FETCH_INTERVAL_VEHICLES - elapsed))
+        except Exception as e:
+            print(f"ZMQ Worker Error: {e}")
+            await asyncio.sleep(1)
 
 async def stop_worker():
     """Fetches TripUpdates and calculates Stop ETAs."""
