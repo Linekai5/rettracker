@@ -56,6 +56,8 @@ export class Vehicle {
         this.element.style.border = '2px solid white';
         this.element.style.boxShadow = '0 0 4px rgba(0,0,0,0.5)';
         this.element.style.cursor = 'pointer';
+        // Add smooth transitions for color and scale
+        this.element.style.transition = 'background-color 0.3s ease, transform 0.3s ease, border-color 0.3s ease';
         
         // Set initial color based on route
         this.setColor(this.getRouteColor(data.route_id));
@@ -181,7 +183,8 @@ export class Vehicle {
             this.element.style.transform = 'scale(1.0)';
             this.element.style.zIndex = '10';
             // Explicitly restore original color from route detection
-            this.element.style.backgroundColor = this.getRouteColor(this.data.route_id);
+            const originalColor = this.getRouteColor(this.data.route_id);
+            this.element.style.backgroundColor = originalColor;
         }
     }
 
@@ -303,7 +306,10 @@ export class Vehicle {
                     } catch (e) {}
                 }
                 
-                this.marker.setLngLat([displayLon, displayLat]);
+                // Guard against invalid coordinates to prevent disappearing
+                if (!isNaN(displayLon) && !isNaN(displayLat)) {
+                    this.marker.setLngLat([displayLon, displayLat]);
+                }
             }
         });
 

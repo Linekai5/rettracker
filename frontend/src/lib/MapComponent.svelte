@@ -99,8 +99,8 @@
                   }
               } catch(e) {}
           }
-          // Restore 1km threshold for total network clipping
-          if (bestRef && minDist < 1.0) {
+          // Threshold: 2.0 km - very aggressive backup to ensure clipping
+          if (bestRef && minDist < 2.0) {
               found = routeGeometries[bestRef];
           }
       }
@@ -133,13 +133,15 @@
 
   function handleSelect(id) {
       if (selectedId === id) {
+          // Deselect current
           if (vehicleState.has(selectedId)) {
               vehicleState.get(selectedId).setSelected(false);
           }
           selectedId = null;
-          if (focusInterval) clearInterval(focusInterval);
-          focusInterval = null;
-          console.log("Cleared focus");
+          if (focusInterval) {
+             clearInterval(focusInterval);
+             focusInterval = null;
+          }
           return;
       }
       
@@ -149,8 +151,7 @@
       }
 
       selectedId = id;
-      console.log("Focused on vehicle:", id);
-
+      
       // Update visual for new selection
       if (vehicleState.has(id)) {
           vehicleState.get(id).setSelected(true);
