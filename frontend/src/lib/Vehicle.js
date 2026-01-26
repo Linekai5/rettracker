@@ -170,18 +170,18 @@ export class Vehicle {
     }
 
     setSelected(selected) {
-        this.isSelected = selected;
-        if (selected) {
-            this.element.style.backgroundColor = '#E91E63'; // Darker pink
+        this.isSelected = !!selected;
+        if (this.isSelected) {
+            this.element.style.backgroundColor = '#E91E63'; // High-contrast selection pink
             this.element.style.border = '3px solid white';
-            this.element.style.zIndex = '1000';
-            this.element.style.transform = 'scale(1.3)';
+            this.element.style.zIndex = '2000';
+            this.element.style.transform = 'scale(1.5)';
         } else {
-            this.isSelected = false;
             this.element.style.border = '2px solid white';
             this.element.style.transform = 'scale(1.0)';
-            this.element.style.zIndex = '1';
-            this.setColor(this.getRouteColor(this.data.route_id));
+            this.element.style.zIndex = '10';
+            // Explicitly restore original color from route detection
+            this.element.style.backgroundColor = this.getRouteColor(this.data.route_id);
         }
     }
 
@@ -198,13 +198,15 @@ export class Vehicle {
         this.routeGeometry = geometry;
         // Immediate snap to new geometry if possible
         if (this.currentPos && this.currentPos.lat && this.currentPos.lon && this.routeGeometry) {
-             const snapped = turf.nearestPointOnLine(this.routeGeometry, [this.currentPos.lon, this.currentPos.lat]);
-             if (snapped && snapped.geometry && snapped.geometry.coordinates) {
-                 // Force update visuals immediately
-                 this.marker.setLngLat(snapped.geometry.coordinates);
-                 this.currentPos.lon = snapped.geometry.coordinates[0];
-                 this.currentPos.lat = snapped.geometry.coordinates[1];
-             }
+             try {
+                 const snapped = turf.nearestPointOnLine(this.routeGeometry, [this.currentPos.lon, this.currentPos.lat]);
+                 if (snapped && snapped.geometry && snapped.geometry.coordinates) {
+                     // Force update visuals immediately
+                     this.currentPos.lon = snapped.geometry.coordinates[0];
+                     this.currentPos.lat = snapped.geometry.coordinates[1];
+                     this.marker.setLngLat([this.currentPos.lon, this.currentPos.lat]);
+                 }
+             } catch (e) {}
         }
     }
 
@@ -230,10 +232,14 @@ export class Vehicle {
         // 2. SNAP CHECK
         // If routeGeometry is available, snap the TARGET coordinate to the line.
         if (this.routeGeometry) {
-             const snapped = turf.nearestPointOnLine(this.routeGeometry, [newData.lon, newData.lat]);
-             if (snapped && snapped.geometry && snapped.geometry.coordinates) {
-                 targetLon = snapped.geometry.coordinates[0];
-                 targetLat = snapped.geometry.coordinates[1];
+             try {
+                 const snapped = turf.nearestPointOnLine(this.routeGeometry, [newData.lon, newData.lat]);
+                 if (snapped && snapped.geometry && snapped.geometry.coordinates) {
+                     targetLon = snapped.geometry.coordinates[0];
+                     targetLat = snapped.geometry.coordinates[1];
+                 }
+             } catch (e) {
+                 console.warn("Snap error during update:", e);
              }
         }
 
@@ -244,7 +250,7 @@ export class Vehicle {
              this.currentPos.lat = targetLat;
              this.currentPos.lon = targetLon;
              this.marker.setLngLat([targetLon, targetLat]);
-             return; // No animation needed for instant pop-in
+             return; 
         }
 
         // Calculate distance from current animated position to new target
@@ -260,40 +266,33 @@ export class Vehicle {
              return;
         }
         
-        // Calculate duration based on speed (m/s)
-        let duration = 2.0; 
-        const speed = newData.speed || 0;
+        // Calculate duration based on distance and update frequency
+        // Focus mode (1s updates) needs faster animation to feel responsive
+        let maxDuration = this.isSelected ? 0.8 : 1.5;
+        let duration = maxDuration; 
         
-        // If we have a valid speed, use it to determine duration (distance / speed)
+        const speed = newData.speed || 0;
         if (speed > 0.1) {
             duration = dist / speed;
-            // Cap duration to avoid super slow drift if speed is remarkably low for distance
             if (duration > 10.0) duration = 10.0; 
-        } else if (dist > 50) {
-             // Teleport or lost signal recovery
-             duration = 2.0; 
         } else {
-             // Stopped or very slow
              duration = 0.5; 
         }
         
-        // Safety cap on duration against fetch interval
-        // Updates are roughly every 2 seconds. Capping at 1.5s ensures we move 
-        // quickly enough to catch up to new updates without "lagging" behind.
-        if (duration > 1.5) duration = 1.5;
+        // Cap duration
+        if (duration > maxDuration) duration = maxDuration;
 
         // Animate Position using calculated duration.
-        // We restore snapping during animation to ensure vehicles follow curves perfectly ("clipping").
+        // Snapping is restored during the interpolation to guarantee alignment with the line.
         gsap.to(this.currentPos, {
             lat: targetLat,
             lon: targetLon,
             duration: duration, 
-            ease: "none", // Linear for constant-speed feel
+            ease: "none", 
             onUpdate: () => {
                 let displayLon = this.currentPos.lon;
                 let displayLat = this.currentPos.lat;
 
-                // If geometry is available, snap the interpolated point to the line
                 if (this.routeGeometry) {
                     try {
                         const snapped = turf.nearestPointOnLine(this.routeGeometry, [displayLon, displayLat]);
@@ -301,9 +300,7 @@ export class Vehicle {
                             displayLon = snapped.geometry.coordinates[0];
                             displayLat = snapped.geometry.coordinates[1];
                         }
-                    } catch (e) {
-                         // Fallback to raw coords if turf fails
-                    }
+                    } catch (e) {}
                 }
                 
                 this.marker.setLngLat([displayLon, displayLat]);

@@ -46,6 +46,8 @@
   };
 
   function resolveGeometry(vData) {
+      if (!vData || !vData.lat || !vData.lon) return null;
+      
       const rid = vData.route_id || "";
       const hint = vData.line_hint || "";
       const cacheKey = `${rid}_${hint}`;
@@ -53,54 +55,53 @@
       if (resolvedCache.has(cacheKey)) return resolvedCache.get(cacheKey);
 
       let found = null;
+      let minDist = Infinity;
+      let bestRef = null;
+      const vPt = [vData.lon, vData.lat];
       
-      // Priority 0: Metro Internal Code Mapping
-      if (METRO_MAPPING[hint] && routeGeometries[METRO_MAPPING[hint]]) {
+      // -- Step 1: Exact Matches (Most Accurate) --
+      if (hint && routeGeometries[hint]) {
+          found = routeGeometries[hint];
+      } else if (rid && routeGeometries[rid]) {
+          found = routeGeometries[rid];
+      } else if (METRO_MAPPING[hint] && routeGeometries[METRO_MAPPING[hint]]) {
           found = routeGeometries[METRO_MAPPING[hint]];
       }
-      // Priority 1: Exact Match on Line Hint (e.g. "33" -> "33")
-      else if (hint && routeGeometries[hint]) {
-          found = routeGeometries[hint];
-      }
-      // Priority 2: Exact Match on Route ID
-      else if (routeGeometries[rid]) {
-          found = routeGeometries[rid];
+      
+      // -- Step 2: Spatial Match (Search within names first) --
+      // If we have a hint like "25", only search lines including "25" for best performance and accuracy
+      if (!found && hint) {
+          for (const [ref, geom] of Object.entries(routeGeometries)) {
+              if (ref.includes(hint) || hint.includes(ref)) {
+                  try {
+                      const snapped = turf.nearestPointOnLine(geom, vPt);
+                      if (snapped && snapped.properties.dist < minDist) {
+                          minDist = snapped.properties.dist;
+                          bestRef = ref;
+                      }
+                  } catch(e) {}
+              }
+          }
+          if (bestRef && minDist < 0.5) found = routeGeometries[bestRef];
       }
       
+      // -- Step 3: Global Spatial Search (Aggressive Clipping) --
+      // If still not found, search the ENTIRE network for the closest line within 1km
       if (!found) {
-          // Priority 3: Fuzzy / Fallback via Spatial Discovery
-          let minDist = Infinity;
-          let bestRef = null;
-          
-          // Only do expensive spatial search if we have valid coordinates
-          if (vData.lat && vData.lon && Math.abs(vData.lat) > 1) {
-               const vPt = [vData.lon, vData.lat];
-               for (const [ref, geom] of Object.entries(routeGeometries)) {
-                   const snapped = turf.nearestPointOnLine(geom, vPt);
-                   if (snapped && snapped.properties && snapped.properties.dist !== undefined) {
-                       if (snapped.properties.dist < minDist) {
-                           minDist = snapped.properties.dist;
-                           bestRef = ref;
-                       }
-                   }
-               }
-          }
-          
-          // Threshold: 0.5 km (500m) - aggressive to ensure vehicles clip to the intended network
-          if (bestRef && minDist < 0.5) {
-               found = routeGeometries[bestRef];
-          } 
-          
-          if (!found) {
-              // Fuzzy Name Fallback
-              for (const key of Object.keys(routeGeometries)) {
-                  if (rid === key || rid.includes(key) || key.includes(rid)) {
-                      if (Math.abs(rid.length - key.length) < 3) {
-                           found = routeGeometries[key];
-                           break;
-                      }
+          minDist = Infinity;
+          bestRef = null;
+          for (const [ref, geom] of Object.entries(routeGeometries)) {
+              try {
+                  const snapped = turf.nearestPointOnLine(geom, vPt);
+                  if (snapped && snapped.properties.dist < minDist) {
+                      minDist = snapped.properties.dist;
+                      bestRef = ref;
                   }
-              }
+              } catch(e) {}
+          }
+          // Restore 1km threshold for total network clipping
+          if (bestRef && minDist < 1.0) {
+              found = routeGeometries[bestRef];
           }
       }
       
@@ -268,7 +269,12 @@
     map = await initMap(mapElement);
     
     // Add click-away listener to the map
-    map.on('click', () => {
+    map.on('click', (e) => {
+        // Only deselect if the click wasn't on a marker element
+        // (Since markers are DOM elements on top, we check e.originalEvent)
+        if (e.originalEvent && e.originalEvent.target && e.originalEvent.target.closest('.vehicle-marker')) {
+             return; 
+        }
         if (selectedId) handleSelect(selectedId);
     });
 
