@@ -283,15 +283,30 @@ export class Vehicle {
         if (duration > 1.5) duration = 1.5;
 
         // Animate Position using calculated duration.
-        // We REMOVED continuous snapping (per-frame) to give the CPU a break and eliminate lag.
-        // The target position is already snapped once per update, which is enough.
+        // We restore snapping during animation to ensure vehicles follow curves perfectly ("clipping").
         gsap.to(this.currentPos, {
             lat: targetLat,
             lon: targetLon,
             duration: duration, 
             ease: "none", // Linear for constant-speed feel
             onUpdate: () => {
-                this.marker.setLngLat([this.currentPos.lon, this.currentPos.lat]);
+                let displayLon = this.currentPos.lon;
+                let displayLat = this.currentPos.lat;
+
+                // If geometry is available, snap the interpolated point to the line
+                if (this.routeGeometry) {
+                    try {
+                        const snapped = turf.nearestPointOnLine(this.routeGeometry, [displayLon, displayLat]);
+                        if (snapped && snapped.geometry && snapped.geometry.coordinates) {
+                            displayLon = snapped.geometry.coordinates[0];
+                            displayLat = snapped.geometry.coordinates[1];
+                        }
+                    } catch (e) {
+                         // Fallback to raw coords if turf fails
+                    }
+                }
+                
+                this.marker.setLngLat([displayLon, displayLat]);
             }
         });
 
