@@ -22,9 +22,15 @@ AGENCY_FILTER = "RET"
 current_vehicles = {} 
 # Map: stop_id -> { id, deps: [ { route, dest, time, delay, trip_id } ] }
 current_stops = {}
+# Map: trip_id -> headsign
+trip_headsigns = {}
 
 # List of queues for connected clients
-vehicle_subscribers = set()
+vehicle_subscribers = {
+    "metro": set(),
+    "tram": set(),
+    "bus": set()
+}
 stop_subscribers = set()
 
 async def fetch_gtfs_feed(client, url):
@@ -66,14 +72,14 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 
 async def vehicle_worker():
     """Fetches VehiclePositions and broadcasts updates."""
-    global current_vehicles
+    global current_vehicles, trip_headsigns
     
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
     async with httpx.AsyncClient(verify=False, timeout=10.0, limits=limits, headers={"User-Agent": "RETTracker/1.0"}) as client:
         while True:
             start_time = time.time()
             new_vehicles = {}
-            updates = []
+            updates_by_type = {"metro": [], "tram": [], "bus": []}
             
             feed = await fetch_gtfs_feed(client, "http://gtfs.ovapi.nl/new/vehiclePositions.pb")
             
@@ -92,47 +98,64 @@ async def vehicle_worker():
                     # If label is available, use it as a display number, else fallback
                     label = v.vehicle.label if v.vehicle.label else v_id.split(':')[-1]
                     
-                    # Speed calculation logic
+                    # Coordinate invalid filter
                     lat = pos.latitude
                     lon = pos.longitude
+                    if not lat or not lon or (abs(lat) < 1 and abs(lon) < 1):
+                        continue
+
                     # Use provided timestamp or fallback to server time
                     ts = v.timestamp if v.timestamp else int(time.time())
                     
-                    # Extract Line Hint from ID (e.g. "RET:33:..." -> "33")
-                    # Format: date:AGENCY:LINE:VEHICLE
+                    # Try to extract headsign/destination from tripUpdates feed mapping
+                    headsign = trip_headsigns.get(v.trip.trip_id, "")
+                    if not headsign:
+                        try:
+                            if v.trip.HasField('trip_headsign'):
+                                headsign = v.trip.trip_headsign
+                        except:
+                            pass
+                    
+                    # Determine Vehicle Type
+                    v_type = "bus" # Default
+                    
+                    # Improved Line Hint extraction (handles both date:RET:LINE and RET:LINE)
                     parts = v_id.split(':')
                     line_hint = ""
-                    if len(parts) >= 3 and parts[1] == "RET":
-                        line_hint = parts[2]
+                    if len(parts) >= 3:
+                        if parts[1] == "RET": line_hint = parts[2]
+                        elif parts[0] == "RET": line_hint = parts[1]
+                    
+                    if line_hint:
+                        lh_upper = line_hint.upper()
+                        # RET Metros are usually A, B, C, D, E or M-prefixed
+                        if lh_upper in ["A", "B", "C", "D", "E"] or lh_upper.startswith("M"):
+                            v_type = "metro"
+                        # Trams are 2, 4, 7, 8, 20, 21, 23, 24, 25
+                        elif lh_upper.isdigit() and int(lh_upper) < 30:
+                            v_type = "tram"
+                    
+                    # 2. Check Route ID as fallback
+                    if v_type == "bus" and v.trip.route_id:
+                        rid = v.trip.route_id.upper()
+                        if any(m in rid for m in ["METRO", "M006", "M007", "M008", "M009", "M010"]):
+                            v_type = "metro"
+                        elif "TRAM" in rid:
+                            v_type = "tram"
 
                     speed = 0.0
-                    
-                    # 1. Calculate speed or preserve previous
                     if v_id in current_vehicles:
-                        prev_v = current_vehicles[v_id]
-                        prev_lat = prev_v["lat"]
-                        prev_lon = prev_v["lon"]
-                        prev_ts = prev_v["timestamp"]
-                        
-                        if ts == prev_ts:
-                            # 2a. Data hasn't changed? Keep the previously calculated/known speed
-                            speed = prev_v["speed"]
+                        prev = current_vehicles[v_id]
+                        if ts > prev["timestamp"]:
+                            dist = haversine_distance(prev["lat"], prev["lon"], lat, lon)
+                            speed = dist / (ts - prev["timestamp"])
                         else:
-                            # 2b. New data? Calculate speed based on distance/time
-                            time_diff = ts - prev_ts
-                            if time_diff > 0:
-                                dist = haversine_distance(prev_lat, prev_lon, lat, lon)
-                                speed = dist / time_diff
-
-                    # 3. If GTFS feed provides a non-zero speed, prefer it
+                            speed = prev["speed"]
+                    
                     if pos.HasField('speed') and pos.speed > 0:
                         speed = pos.speed
-
-                    # SAFETY CLAMP: 
-                    # If calculated or fed speed is absurd (> 130 km/h = ~36 m/s), 
-                    # it's likely a GPS error or distance jump. Reset to 0 or clamp.
-                    if speed > 36.0: 
-                        speed = 0.0
+                    
+                    if speed > 36.0: speed = 0.0
 
                     vehicle_data = {
                         "id": v_id,
@@ -143,6 +166,8 @@ async def vehicle_worker():
                         "speed": round(speed, 1),
                         "trip_id": v.trip.trip_id,
                         "route_id": v.trip.route_id,
+                        "headsign": headsign,
+                        "type": v_type,
                         "line_hint": line_hint,
                         "timestamp": ts
                     }
@@ -150,38 +175,36 @@ async def vehicle_worker():
                     new_vehicles[v_id] = vehicle_data
 
                     # Diff Check
-                    # If vehicle is new OR data has changed significantly
-                    if v_id not in current_vehicles:
-                        updates.append(vehicle_data)
-                    else:
+                    changed = True
+                    if v_id in current_vehicles:
                         old = current_vehicles[v_id]
-                        # Only broadcast if moved keys changed
-                        if (old["lat"] != vehicle_data["lat"] or 
-                            old["lon"] != vehicle_data["lon"] or
-                            old["bearing"] != vehicle_data["bearing"]):
-                            updates.append(vehicle_data)
+                        if (old["lat"] == vehicle_data["lat"] and 
+                            old["lon"] == vehicle_data["lon"] and 
+                            old["bearing"] == vehicle_data["bearing"]):
+                            changed = False
+                    
+                    if changed:
+                        updates_by_type[v_type].append(vehicle_data)
 
                 # Update global state
-                # We do NOT clear old vehicles immediately to avoid flickering if one frame fails,
-                # but for simplicity in this "live" view we usually replace the whole state 
-                # or have a timeout mechanism. For now, full replacement of active vehicles.
                 current_vehicles = new_vehicles
                 
-                # Broadcast
-                if updates and vehicle_subscribers:
-                    msg = json.dumps({"type": "vehicles", "data": updates})
-                    for q in list(vehicle_subscribers):
-                        try:
-                            q.put_nowait(msg)
-                        except asyncio.QueueFull:
-                            pass
+                # Broadcast specifically to categorical subscribers
+                for vt, items in updates_by_type.items():
+                    if items:
+                        msg = json.dumps({"type": "vehicles", "vehicle_type": vt, "data": items})
+                        for q in list(vehicle_subscribers[vt]):
+                            try:
+                                q.put_nowait(msg)
+                            except asyncio.QueueFull:
+                                pass
 
             elapsed = time.time() - start_time
             await asyncio.sleep(max(0.1, FETCH_INTERVAL_VEHICLES - elapsed))
 
 async def stop_worker():
     """Fetches TripUpdates and calculates Stop ETAs."""
-    global current_stops
+    global current_stops, trip_headsigns
     
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
     async with httpx.AsyncClient(verify=False, timeout=15.0, limits=limits, headers={"User-Agent": "RETTracker/1.0"}) as client:
@@ -203,6 +226,15 @@ async def stop_worker():
                     trip_id = tu.trip.trip_id
                     route_id = tu.trip.route_id
                     
+                    # Try to find terminus/headsign in StopTimeUpdates
+                    # The last stop headsign is usually the destination
+                    if tu.stop_time_update:
+                        last_stu = tu.stop_time_update[-1]
+                        if last_stu.HasField('stop_headsign'):
+                            trip_headsigns[trip_id] = last_stu.stop_headsign
+                        elif tu.trip.HasField('trip_headsign'): # some producers use this
+                            trip_headsigns[trip_id] = tu.trip.trip_headsign
+
                     # Iterate through stop updates in this trip
                     for stu in tu.stop_time_update:
                         stop_id = stu.stop_id
@@ -296,26 +328,37 @@ def health_check():
     return {"status": "ok", "message": "Backend is running and CORS is configured open."}
 
 
-@app.get("/vehicles-sse")
-async def vehicles_sse(request: Request):
+@app.get("/vehicles/{vehicle_id}")
+async def get_vehicle(vehicle_id: str):
+    if vehicle_id in current_vehicles:
+        return current_vehicles[vehicle_id]
+    return {"error": "Vehicle not found", "id": vehicle_id}
+
+@app.get("/{v_type}-sse")
+async def categorical_sse(request: Request, v_type: str):
+    if v_type not in ["metro", "tram", "bus"]:
+        return {"error": "Invalid vehicle type"}
+    
     async def event_generator():
-        q = asyncio.Queue(maxsize=100)
-        vehicle_subscribers.add(q)
+        q = asyncio.Queue(maxsize=150)
+        vehicle_subscribers[v_type].add(q)
         try:
-            # 1. Send Snapshot
-            if current_vehicles:
-                # Convert dict to list for initial payload
-                snapshot = list(current_vehicles.values())
-                yield f"data: {json.dumps({'type': 'vehicles', 'data': snapshot})}\n\n"
+            # 1. Send Initial Snapshot for this specific type ONLY
+            # This ensures fast initial load of the checked category
+            snapshot = [v for v in current_vehicles.values() if v.get("type") == v_type]
+            if snapshot:
+                yield f"data: {json.dumps({'type': 'vehicles', 'vehicle_type': v_type, 'data': snapshot})}\n\n"
 
             while True:
                 if await request.is_disconnected(): break
+                # Queue will only receive updates for this specific v_type 
+                # because the vehicle_worker broadcasts to categorical sets.
                 data = await q.get()
                 yield f"data: {data}\n\n"
         except asyncio.CancelledError:
             pass
         finally:
-            vehicle_subscribers.discard(q)
+            vehicle_subscribers[v_type].discard(q)
 
     return StreamingResponse(
         event_generator(),

@@ -31,6 +31,7 @@ export class Vehicle {
         this.id = data.id;
         this.map = map;
         this.routeGeometry = routeGeometry; // MultiLineString or LineString
+        this.isSelected = false;
         
         // Initial Snap
         let initialPos = [data.lon, data.lat];
@@ -75,6 +76,16 @@ export class Vehicle {
             
         this.element.addEventListener('mouseenter', () => this.marker.setPopup(this.popup).togglePopup());
         this.element.addEventListener('mouseleave', () => this.popup.remove());
+
+        // Handle selection
+        this.element.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (this.onSelect) this.onSelect(this.id);
+        });
+    }
+
+    setOnSelect(callback) {
+        this.onSelect = callback;
     }
 
     getRouteColor(routeId) {
@@ -143,19 +154,35 @@ export class Vehicle {
         const vehicleNum = data.label || data.id;
 
         return `
-            <div style="color:black; font-family:sans-serif; font-size:13px; min-width:120px; padding:5px;">
+            <div style="color:black; font-family:sans-serif; font-size:13px; min-width:140px; padding:5px;">
                 <div style="font-weight:bold; font-size:14px; margin-bottom:4px; border-bottom:1px solid #ccc; padding-bottom:2px;">
                     ${displayTitle}
                 </div>
-                <!-- <div style="font-style:italic; color:#555; margin-bottom:4px;">To: ${data.headsign || "Unknown Terminus"}</div> -->
+                <div style="font-style:italic; color:#555; margin-bottom:6px;">To: <strong>${data.headsign || "Unknown Terminus"}</strong></div>
                 <div>Speed: <strong>${speedKmh}</strong></div>
-                <div style="color:#666; font-size:11px; margin-top:4px;">Veh #: ${vehicleNum}</div>
             </div>
         `;
     }
 
     setColor(color) {
+        if (this.isSelected) return; // Don't override pink if selected
         this.element.style.backgroundColor = color;
+    }
+
+    setSelected(selected) {
+        this.isSelected = selected;
+        if (selected) {
+            this.element.style.backgroundColor = '#E91E63'; // Darker pink
+            this.element.style.border = '3px solid white';
+            this.element.style.zIndex = '1000';
+            this.element.style.transform = 'scale(1.3)';
+        } else {
+            this.isSelected = false;
+            this.element.style.border = '2px solid white';
+            this.element.style.transform = 'scale(1.0)';
+            this.element.style.zIndex = '1';
+            this.setColor(this.getRouteColor(this.data.route_id));
+        }
     }
 
     setSize(size) {
@@ -251,37 +278,20 @@ export class Vehicle {
         }
         
         // Safety cap on duration against fetch interval
-        // If duration is too long compared to updates, we'll always lag.
-        // Assuming ~2s updates, allowing up to 3s smooths it out.
-        // But if speed says 30s, we should probably just move faster to catch up.
-        if (duration > 3.0) duration = 3.0;
+        // Updates are roughly every 2 seconds. Capping at 1.5s ensures we move 
+        // quickly enough to catch up to new updates without "lagging" behind.
+        if (duration > 1.5) duration = 1.5;
 
-        // Animate Position using calculated duration and linear ease for steady flow
+        // Animate Position using calculated duration.
+        // We REMOVED continuous snapping (per-frame) to give the CPU a break and eliminate lag.
+        // The target position is already snapped once per update, which is enough.
         gsap.to(this.currentPos, {
             lat: targetLat,
             lon: targetLon,
             duration: duration, 
-            ease: "none",
+            ease: "none", // Linear for constant-speed feel
             onUpdate: () => {
-                let displayLon = this.currentPos.lon;
-                let displayLat = this.currentPos.lat;
-
-                // Continuous Snap
-                // This ensures that even if the linear interpolation between A and B
-                // cuts a corner, we project the marker back onto the track for every frame.
-                if (this.routeGeometry) {
-                     // We snap the current animated position to the route line
-                     const snapped = turf.nearestPointOnLine(this.routeGeometry, [displayLon, displayLat]);
-                     if (snapped && snapped.geometry && snapped.geometry.coordinates) {
-                         // Only apply continuous snap if reasonably close (e.g. < 50m)
-                         // optimizing for visual correctness without wild jumps if geometry is looped
-                         // But for now, strict snapping is requested.
-                         displayLon = snapped.geometry.coordinates[0];
-                         displayLat = snapped.geometry.coordinates[1];
-                     }
-                }
-                
-                this.marker.setLngLat([displayLon, displayLat]);
+                this.marker.setLngLat([this.currentPos.lon, this.currentPos.lat]);
             }
         });
 
