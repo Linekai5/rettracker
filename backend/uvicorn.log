@@ -1,0 +1,9 @@
+nohup: ignoring input
+INFO:     Will watch for changes in these directories: ['/workspaces/rettracker/backend']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [27551] using WatchFiles
+INFO:     Started server process [27564]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+ZeroMQ Listener Active: tcp://pubsub.besteffort.ndovloket.nl:7658
+INFO:     127.0.0.1:46302 - "GET /tram-sse HTTP/1.1" 200 OK

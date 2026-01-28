@@ -8,9 +8,7 @@ import asyncio
 import json
 import time
 import math
-import zmq
-import zmq.asyncio
-import gzip
+
 
 # --- Configuration ---
 # Vehicles update often (locations). Reduced to 1.0s for faster feel.
@@ -86,27 +84,14 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return R * c
 
 async def vehicle_worker():
-    """Fetches VehiclePositions via ZeroMQ for ultra-low latency updates."""
+    """Fetches VehiclePositions via HTTP Polling."""
     global current_vehicles, trip_headsigns
     
-    # Setup ZMQ Subscriber
-    ctx = zmq.asyncio.Context()
-    sock = ctx.socket(zmq.SUB)
-    # Standard NDOV-Loket PubSub endpoint (Best Effort)
-    sock.connect("tcp://pubsub.besteffort.ndovloket.nl:7658")
-    # Subscribe specifically to VehiclePositions
-    sock.setsockopt_string(zmq.SUBSCRIBE, "/GOVI/KV78/VehiclePositions")
-    
-    print("ZeroMQ Listener Active: tcp://pubsub.besteffort.ndovloket.nl:7658")
-
-    while True:
-        try:
-            # Receive multipart: [topic, gzip_data]
-            multipart = await sock.recv_multipart()
-            content = gzip.decompress(multipart[1])
-            
-            feed = gtfs_realtime_pb2.FeedMessage()
-            feed.ParseFromString(content)
+    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+    async with httpx.AsyncClient(verify=False, timeout=10.0, limits=limits) as client:
+        while True:
+            start_time = time.time()
+            feed = await fetch_gtfs_feed(client, "http://gtfs.ovapi.nl/new/vehiclePositions.pb")
             
             updates_by_type = {"metro": [], "tram": [], "bus": []}
             found_ret_entities = False
@@ -214,7 +199,6 @@ async def vehicle_worker():
                         updates_by_type[v_type].append(vehicle_data)
 
             # Cleanup Stale Vehicles (TTL 60s)
-            # This handles cases where vehicles disappear from the feed
             now = time.time()
             stale_keys = [k for k, v in current_vehicles.items() if (now - v['timestamp']) > 60]
             for k in stale_keys:
@@ -230,9 +214,8 @@ async def vehicle_worker():
                         except asyncio.QueueFull:
                             pass
 
-        except Exception as e:
-            print(f"ZMQ Worker Error: {e}")
-            await asyncio.sleep(1)
+            elapsed = time.time() - start_time
+            await asyncio.sleep(max(0.1, FETCH_INTERVAL_VEHICLES - elapsed))
 
 async def stop_worker():
     """Fetches TripUpdates and calculates Stop ETAs."""
@@ -376,17 +359,21 @@ async def categorical_sse(request: Request, v_type: str):
         vehicle_subscribers[v_type].add(q)
         try:
             # 1. Send Initial Snapshot for this specific type ONLY
-            # This ensures fast initial load of the checked category
             snapshot = [v for v in current_vehicles.values() if v.get("type") == v_type]
             if snapshot:
                 yield f"data: {json.dumps({'type': 'vehicles', 'vehicle_type': v_type, 'data': snapshot})}\n\n"
+            else:
+                # Immediate keep-alive to flush headers if no data
+                yield ": keep-alive\n\n"
 
             while True:
                 if await request.is_disconnected(): break
-                # Queue will only receive updates for this specific v_type 
-                # because the vehicle_worker broadcasts to categorical sets.
-                data = await q.get()
-                yield f"data: {data}\n\n"
+                try:
+                    # Wait for data or timeout (heartbeat)
+                    data = await asyncio.wait_for(q.get(), timeout=5.0)
+                    yield f"data: {data}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
         except asyncio.CancelledError:
             pass
         finally:
@@ -416,11 +403,16 @@ async def stops_sse(request: Request):
                     chunk = all_stops[i:i + chunk_size]
                     yield f"data: {json.dumps({'type': 'stops', 'data': chunk})}\n\n"
                     await asyncio.sleep(0.01)
+            else:
+                 yield ": keep-alive\n\n"
 
             while True:
                 if await request.is_disconnected(): break
-                data = await q.get()
-                yield f"data: {data}\n\n"
+                try:
+                    data = await asyncio.wait_for(q.get(), timeout=5.0)
+                    yield f"data: {data}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
         except asyncio.CancelledError:
             pass
         finally:
