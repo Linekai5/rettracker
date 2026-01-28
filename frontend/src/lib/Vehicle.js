@@ -298,18 +298,27 @@ export class Vehicle {
         if (duration > maxDuration) duration = maxDuration;
 
         // Animate Position using calculated duration.
-        // REMOVED high-frequency turf snapping from the animation loop.
-        // It causes main-thread blocking which makes markers detach from the map during panning/dragging.
-        // We trust the linear interpolation between the two snapped points (start and end).
+        // We include snapping in the update loop to ensure vehicles follow curves.
         gsap.to(this.currentPos, {
             lat: targetLat,
             lon: targetLon,
             duration: duration, 
             ease: "none", 
             onUpdate: () => {
-                // Determine display coordinates (simple linear, no heavy math)
-                const displayLon = this.currentPos.lon;
-                const displayLat = this.currentPos.lat;
+                let displayLon = this.currentPos.lon;
+                let displayLat = this.currentPos.lat;
+
+                // Snap intermediate position to line for perfect tracking
+                // This ensures the vehicle follows the curve instead of cutting corners
+                if (this.routeGeometry) {
+                    try {
+                        const snapped = turf.nearestPointOnLine(this.routeGeometry, [displayLon, displayLat]);
+                        if (snapped && snapped.geometry && snapped.geometry.coordinates) {
+                            displayLon = snapped.geometry.coordinates[0];
+                            displayLat = snapped.geometry.coordinates[1];
+                        }
+                    } catch (e) {}
+                }
                 
                 // Guard against invalid coordinates
                 if (!isNaN(displayLon) && !isNaN(displayLat)) {
