@@ -108,8 +108,8 @@
                   }
               } catch(e) {}
           }
-          // Threshold: 2.0 km - very aggressive backup
-          if (bestRef && minDist < 2.0) {
+          // Threshold: 0.5 km - stricter backup to avoid snapping to wrong parallel lines
+          if (bestRef && minDist < 0.5) {
               foundEntry = routeGeometries[bestRef];
           }
       }
@@ -215,8 +215,14 @@
                       chunks.push(dataArr.slice(i, i + size));
                   }
 
-                  const processNext = (idx) => {
+                      const processNext = (idx) => {
                       if (idx >= chunks.length) return;
+
+                      // FIX: Stop processing if the stream has been disabled
+                      // payload.vehicle_type comes from the server (e.g. "metro", "tram", "bus")
+                      if (payload.vehicle_type && !enabledTypes[payload.vehicle_type]) {
+                           return;
+                      }
                       
                       chunks[idx].forEach(vData => {
                           // Optimization: If a vehicle is selected, skip 80% of updates for others

@@ -298,7 +298,72 @@ export class Vehicle {
         if (duration > maxDuration) duration = maxDuration;
 
         // Animate Position using calculated duration.
-        // We include snapping in the update loop to ensure vehicles follow curves.
+        // We use path interpolation to ensure the vehicle sticks to the line.
+        if (this.routeGeometry) {
+             const startPt = [this.currentPos.lon, this.currentPos.lat];
+             const endPt = [targetLon, targetLat];
+             
+             let geomToUse = null;
+
+             if (this.routeGeometry.type === 'LineString') {
+                 geomToUse = this.routeGeometry;
+             } else if (this.routeGeometry.type === 'MultiLineString') {
+                 try {
+                     const snapStart = turf.nearestPointOnLine(this.routeGeometry, startPt);
+                     const snapEnd = turf.nearestPointOnLine(this.routeGeometry, endPt);
+                     
+                     // Only animate along path if both points map to the same continuous segment
+                     if (snapStart && snapEnd && (typeof snapStart.properties.index === 'number') && snapStart.properties.index === snapEnd.properties.index) {
+                          geomToUse = { 
+                              type: 'LineString', 
+                              coordinates: this.routeGeometry.coordinates[snapStart.properties.index] 
+                          };
+                     }
+                 } catch(e) {}
+             }
+
+             if (geomToUse) {
+                  try {
+                    const slice = turf.lineSlice(turf.point(startPt), turf.point(endPt), geomToUse);
+                    const pathLen = turf.length(slice, { units: 'meters' });
+                    
+                    if (pathLen < 1) {
+                         this.currentPos.lat = targetLat;
+                         this.currentPos.lon = targetLon;
+                         this.marker.setLngLat([targetLon, targetLat]);
+                    } else {
+                        const anim = { dist: 0 };
+                        gsap.to(anim, {
+                            dist: pathLen,
+                            duration: duration,
+                            ease: "none",
+                            onUpdate: () => {
+                                const pt = turf.along(slice, anim.dist, { units: 'meters' });
+                                if (pt && pt.geometry && pt.geometry.coordinates) {
+                                    const [lon, lat] = pt.geometry.coordinates;
+                                    this.currentPos.lon = lon;
+                                    this.currentPos.lat = lat;
+                                    this.marker.setLngLat([lon, lat]);
+                                }
+                            }
+                        });
+                    }
+                  } catch (e) {
+                      // Fallback if slice fails
+                      this.animateLinear(targetLat, targetLon, duration);
+                  }
+             } else {
+                  this.animateLinear(targetLat, targetLon, duration);
+             }
+        } else {
+             this.animateLinear(targetLat, targetLon, duration);
+        }
+
+        // Update Popup
+        this.popup.setHTML(this.getPopupContent(newData));
+    }
+
+    animateLinear(targetLat, targetLon, duration) {
         gsap.to(this.currentPos, {
             lat: targetLat,
             lon: targetLon,
@@ -307,28 +372,23 @@ export class Vehicle {
             onUpdate: () => {
                 let displayLon = this.currentPos.lon;
                 let displayLat = this.currentPos.lat;
-
-                // Snap intermediate position to line for perfect tracking
-                // This ensures the vehicle follows the curve instead of cutting corners
+                
+                // Attempt simple snap during linear fallback
                 if (this.routeGeometry) {
                     try {
                         const snapped = turf.nearestPointOnLine(this.routeGeometry, [displayLon, displayLat]);
                         if (snapped && snapped.geometry && snapped.geometry.coordinates) {
-                            displayLon = snapped.geometry.coordinates[0];
-                            displayLat = snapped.geometry.coordinates[1];
+                             displayLon = snapped.geometry.coordinates[0];
+                             displayLat = snapped.geometry.coordinates[1];
                         }
                     } catch (e) {}
                 }
-                
-                // Guard against invalid coordinates
+
                 if (!isNaN(displayLon) && !isNaN(displayLat)) {
                     this.marker.setLngLat([displayLon, displayLat]);
                 }
             }
         });
-
-        // Update Popup
-        this.popup.setHTML(this.getPopupContent(newData));
     }
 
     getHaversineDistance(lat1, lon1, lat2, lon2) {
