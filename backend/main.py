@@ -60,10 +60,23 @@ async def fetch_gtfs_feed(client, url):
 
 def is_ret_entity(entity):
     """Checks if the entity belongs to RET."""
-    # Logic: usually the entity ID for RET starts with "date:RET:..."
-    # or the trip_update.trip.trip_id might contain it.
-    # From inspection: id: "2026-01-19:RET:M007:186099"
-    return AGENCY_FILTER in entity.id
+    # Broaden filter to ensure full fleet visibility
+    # Check ID, Trip Route ID, or Label
+    s_id = str(entity.id).upper()
+    if "RET" in s_id: return True
+    
+    # Deep inspection for mixed agency feeds
+    if entity.HasField('vehicle'):
+        v = entity.vehicle
+        if v.trip.route_id.startswith('RET:'): return True
+        # Check for numeric-only lines that might be RET trams but missing prefix
+        if v.trip.route_id in KNOWN_TRAM_LINES: return True
+        
+    if entity.HasField('trip_update'):
+        t = entity.trip_update
+        if t.trip.route_id.startswith('RET:'): return True
+        
+    return False
 
 def haversine_distance(lat1, lon1, lat2, lon2):
     """
@@ -153,10 +166,20 @@ async def vehicle_worker():
                             v_type = "tram"
                         elif rid in KNOWN_TRAM_LINES:
                             v_type = "tram"
+                    
+                    # 3. Label Fallback (e.g. "Line C")
+                    if v_type == "bus" and line_hint:
+                         # Sometimes line hint is just the letter/number
+                         if line_hint in ["A", "B", "C", "D", "E"]: 
+                             v_type = "metro"
 
                     speed = 0.0
                     if v_id in current_vehicles:
                         prev = current_vehicles[v_id]
+                        # Persistence for headsign
+                        if not headsign and prev["headsign"]:
+                            headsign = prev["headsign"]
+
                         if ts > prev["timestamp"]:
                             dist = haversine_distance(prev["lat"], prev["lon"], lat, lon)
                             speed = dist / (ts - prev["timestamp"])

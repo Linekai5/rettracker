@@ -61,8 +61,16 @@
       
       // Helper: Check type compatibility (e.g. don't snap Bus to Tram line)
       const isCompat = (entry) => {
-          if (!entry.type || !vData.type) return true;
-          return entry.type === vData.type;
+          // Strict Validation: If types are defined, they MUST match.
+          // If the track has no type, we assume it's generic (unlikely for colored tracks).
+          // If vehicle has no type, we can't be strict, but we shouldn't snap to specific tracks like Metro.
+          if (entry.type && vData.type) {
+              return entry.type === vData.type;
+          }
+          // If strictly one is missing, prevent mixing Metro/Tram/Bus accidentally
+          // Assuming all entries have types (bus, tram, metro)
+          if (entry.type) return false; 
+          return true;
       };
       
       // -- Step 1: Exact Matches (Most Accurate) --

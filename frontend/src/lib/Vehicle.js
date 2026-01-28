@@ -55,9 +55,13 @@ export class Vehicle {
         this.element.style.borderRadius = '50%';
         this.element.style.border = '2px solid white';
         this.element.style.boxShadow = '0 0 4px rgba(0,0,0,0.5)';
-        this.element.style.cursor = 'pointer';
+        this.element.style.cursor = 'default';
+        this.element.style.pointerEvents = 'none'; // UI Freeze: Disable interactions
+        // Ensure perfect centering: MapLibre anchors to center, but standard CSS centering ensures no offset issues
+        this.element.style.transform = 'translate(-50%, -50%)'; 
+        
         // Add smooth transitions for color and scale
-        this.element.style.transition = 'background-color 0.3s ease, transform 0.3s ease, border-color 0.3s ease';
+        this.element.style.transition = 'background-color 0.3s ease, border-color 0.3s ease';
         
         // Set initial color based on route
         this.setColor(this.getRouteColor(data.route_id));
@@ -65,29 +69,20 @@ export class Vehicle {
         // Create Marker
         // We use default rotationAlignment ('auto' -> 'viewport') to ensure the
         // circle always faces the screen and stays centered on the coordinate.
-        // Rotation is removed because a circle has no visual direction.
         this.marker = new maplibregl.Marker({
-            element: this.element
+            element: this.element,
+            anchor: 'center' // Explicit anchor
         })
         .setLngLat([data.lon, data.lat])
         .addTo(map);
 
-        // Optional: Popup
-        this.popup = new maplibregl.Popup({ offset: 10, closeButton: false })
-            .setHTML(this.getPopupContent(data));
-            
-        this.element.addEventListener('mouseenter', () => this.marker.setPopup(this.popup).togglePopup());
-        this.element.addEventListener('mouseleave', () => this.popup.remove());
-
-        // Handle selection
-        this.element.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (this.onSelect) this.onSelect(this.id);
-        });
+        // Remove Popup/Selection Logic for UI Freeze
+        // this.popup = ...
+        // this.element.addEventListener ...
     }
 
     setOnSelect(callback) {
-        this.onSelect = callback;
+        // Disabled
     }
 
     getRouteColor(routeId) {
@@ -179,25 +174,12 @@ export class Vehicle {
     }
 
     setColor(color) {
-        if (this.isSelected) return; // Don't override pink if selected
+        // Static color only
         this.element.style.backgroundColor = color;
     }
 
     setSelected(selected) {
-        this.isSelected = !!selected;
-        if (this.isSelected) {
-            this.element.style.backgroundColor = '#E91E63'; // High-contrast selection pink
-            this.element.style.border = '3px solid white';
-            this.element.style.zIndex = '2000';
-            this.element.style.transform = 'scale(1.5)';
-        } else {
-            this.element.style.border = '2px solid white';
-            this.element.style.transform = 'scale(1.0)';
-            this.element.style.zIndex = '10';
-            // Explicitly restore original color from route detection
-            const originalColor = this.getRouteColor(this.data.route_id);
-            this.element.style.backgroundColor = originalColor;
-        }
+        // Disabled logic
     }
 
     setSize(size) {
@@ -360,7 +342,7 @@ export class Vehicle {
         }
 
         // Update Popup
-        this.popup.setHTML(this.getPopupContent(newData));
+        // this.popup.setHTML(this.getPopupContent(newData));
     }
 
     animateLinear(targetLat, targetLon, duration) {
