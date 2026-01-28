@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { initMap } from './map.js';
-  import { browser } from '$app/environment';
+  import { browser, dev } from '$app/environment';
   import { Vehicle } from './Vehicle.js';
   // Removed direct import to avoid bundling 2.4MB JSON
   // import retData from '$lib/assets/ret_network.json';
@@ -18,8 +18,8 @@
   const resolvedCache = new Map(); // rid + hint -> geometry
   
   // Use relative URLs to leverage Vite proxy in dev (works in Codespaces)
-  // In production, this allows serving frontend/backend from same origin or via reverse proxy
-  const API_BASE = ''; 
+  // In production, fallback to the external backend URL
+  const API_BASE = dev ? '' : 'https://rettrack.dfelix.systems'; 
 
   // Mapping from internal RET Metro lineage to public identifiers
   const METRO_MAPPING = {
