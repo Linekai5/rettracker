@@ -9,17 +9,12 @@
 
   let mapElement;
   let map;
-  let sseConnections = { metro: null, tram: null, bus: null };
+  let sseConnection = null;
   let selectedId = null;
   let focusInterval = null;
   
-  // Filter state
-  let enabledTypes = {
-      tram: false,
-      metro: false,
-      bus: false
-  };
-
+  // Removed filter state
+  
   const vehicleState = new Map(); // Map<id, Vehicle>
   const routeGeometries = {}; // route_id -> MultiLineString
   const resolvedCache = new Map(); // rid + hint -> geometry
@@ -184,31 +179,27 @@
   }
 
 
-  async function stopVehicleStream(type) {
-      if (sseConnections[type]) {
-          sseConnections[type].close();
-          sseConnections[type] = null;
+async function stopVehicleStream() {
+      if (sseConnection) {
+          sseConnection.close();
+          sseConnection = null;
       }
-      // Remove vehicles of this type from the map
-      vehicleState.forEach((v, id) => {
-          if (v.data.type === type) {
-              v.remove();
-              vehicleState.delete(id);
-          }
-      });
+      // Remove all vehicles
+      vehicleState.forEach((v) => v.remove());
+      vehicleState.clear();
   }
 
-  async function startVehicleStream(type) {
-      if (sseConnections[type]) return; // Already running
+  async function startVehicleStream() {
+      if (sseConnection) return; // Already running
 
-      const url = `${API_BASE}/${type}-sse`;
-      console.log(`Connecting to ${type} SSE:`, url);
+      const url = `${API_BASE}/vehicles-sse`;
+      console.log(`Connecting to Unified Vehicle SSE:`, url);
 
       const evtSource = new EventSource(url);
-      sseConnections[type] = evtSource;
+      sseConnection = evtSource;
       
       evtSource.onopen = () => {
-          console.log(`${type} SSE Connection established.`);
+          console.log(`Vehicle SSE Connection established.`);
       };
       
       evtSource.onmessage = (e) => {
@@ -223,14 +214,8 @@
                       chunks.push(dataArr.slice(i, i + size));
                   }
 
-                      const processNext = (idx) => {
+                  const processNext = (idx) => {
                       if (idx >= chunks.length) return;
-
-                      // FIX: Stop processing if the stream has been disabled
-                      // payload.vehicle_type comes from the server (e.g. "metro", "tram", "bus")
-                      if (payload.vehicle_type && !enabledTypes[payload.vehicle_type]) {
-                           return;
-                      }
                       
                       chunks[idx].forEach(vData => {
                           // Optimization: If a vehicle is selected, skip 80% of updates for others
@@ -261,24 +246,13 @@
                   processNext(0);
               }
           } catch (err) {
-              console.error(`Error parsing ${type} SSE`, err);
+              console.error(`Error parsing Vehicle SSE`, err);
           }
       };
 
       evtSource.onerror = (err) => {
-          console.error(`${type} SSE Error:`, err);
+          console.error(`Vehicle SSE Error:`, err);
       };
-  }
-
-  // Handle filter toggles
-  $: if (browser && map) {
-      if (enabledTypes.metro) startVehicleStream('metro'); else stopVehicleStream('metro');
-  }
-  $: if (browser && map) {
-      if (enabledTypes.tram) startVehicleStream('tram'); else stopVehicleStream('tram');
-  }
-  $: if (browser && map) {
-      if (enabledTypes.bus) startVehicleStream('bus'); else stopVehicleStream('bus');
   }
 
   onMount(async () => {
@@ -401,8 +375,8 @@
              }
              
              // 7. Start Live Vehicle Stream
-             // (Now controlled by reactive checkboxes)
-             // startVehicleStream();
+             // Unified stream starts automatically
+             startVehicleStream();
         };
 
         if (map.loaded()) {
@@ -414,13 +388,12 @@
     } catch (err) {
         console.error("Failed to load network geometry", err);
         // Fallback: Start vehicles anyway
+        startVehicleStream();
     }
   });
 
   onDestroy(() => {
-     Object.values(sseConnections).forEach(conn => {
-         if (conn) conn.close();
-     });
+     if (sseConnection) sseConnection.close();
      if (focusInterval) {
          clearInterval(focusInterval);
      }
@@ -431,23 +404,6 @@
 
 <div bind:this={mapElement} class="map-container"></div>
 
-<div class="sidebar">
-    <div class="filter-group">
-        <label>
-            <input type="checkbox" bind:checked={enabledTypes.metro} />
-            Metro
-        </label>
-        <label>
-            <input type="checkbox" bind:checked={enabledTypes.tram} />
-            Tram
-        </label>
-        <label>
-            <input type="checkbox" bind:checked={enabledTypes.bus} />
-            Bus
-        </label>
-    </div>
-</div>
-
 <style>
   .map-container {
     width: 100%;
@@ -455,41 +411,5 @@
     position: absolute;
     top: 0;
     left: 0;
-  }
-
-  .sidebar {
-      position: absolute;
-      top: 80px;
-      right: 20px;
-      padding: 15px;
-      background: rgba(0, 22, 61, 0.85);
-      backdrop-filter: blur(4px);
-      color: white;
-      border-radius: 8px;
-      font-family: sans-serif;
-      z-index: 1001;
-      box-shadow: 0 4px 15px rgba(0,0,0,0.4);
-      min-width: 120px;
-  }
-
-  .filter-group {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-  }
-
-  .filter-group label {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      cursor: pointer;
-      font-size: 1rem;
-      user-select: none;
-  }
-
-  .filter-group input {
-      width: 18px;
-      height: 18px;
-      cursor: pointer;
   }
 </style>

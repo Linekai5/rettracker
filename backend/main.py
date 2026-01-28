@@ -39,11 +39,8 @@ current_stops = {}
 trip_headsigns = {}
 
 # List of queues for connected clients
-vehicle_subscribers = {
-    "metro": set(),
-    "tram": set(),
-    "bus": set()
-}
+# Unified subscriber set for all vehicles
+vehicle_subscribers = set()
 stop_subscribers = set()
 
 async def fetch_gtfs_feed(client, url):
@@ -106,7 +103,7 @@ async def vehicle_worker():
             start_time = time.time()
             feed = await fetch_gtfs_feed(client, "http://gtfs.ovapi.nl/new/vehiclePositions.pb")
             
-            updates_by_type = {"metro": [], "tram": [], "bus": []}
+            all_updates = []
             found_ret_entities = False
             
             if feed:
@@ -219,7 +216,7 @@ async def vehicle_worker():
                     current_vehicles[v_id] = vehicle_data
 
                     if changed:
-                        updates_by_type[v_type].append(vehicle_data)
+                        all_updates.append(vehicle_data)
 
             # Cleanup Stale Vehicles (TTL 60s)
             now = time.time()
@@ -228,14 +225,13 @@ async def vehicle_worker():
                 del current_vehicles[k]
                 
             # Broadcast updates
-            for vt, items in updates_by_type.items():
-                if items:
-                    msg = json.dumps({"type": "vehicles", "vehicle_type": vt, "data": items})
-                    for q in list(vehicle_subscribers[vt]):
-                        try:
-                            q.put_nowait(msg)
-                        except asyncio.QueueFull:
-                            pass
+            if all_updates and vehicle_subscribers:
+                msg = json.dumps({"type": "vehicles", "data": all_updates})
+                for q in list(vehicle_subscribers):
+                    try:
+                        q.put_nowait(msg)
+                    except asyncio.QueueFull:
+                        pass
 
             elapsed = time.time() - start_time
             await asyncio.sleep(max(0.1, FETCH_INTERVAL_VEHICLES - elapsed))
@@ -372,19 +368,17 @@ async def get_vehicle(vehicle_id: str):
         return current_vehicles[vehicle_id]
     return {"error": "Vehicle not found", "id": vehicle_id}
 
-@app.get("/{v_type}-sse")
-async def categorical_sse(request: Request, v_type: str):
-    if v_type not in ["metro", "tram", "bus"]:
-        return {"error": "Invalid vehicle type"}
-    
+@app.get("/vehicles-sse")
+async def vehicles_sse(request: Request):
+    """Unified stream for all vehicles."""
     async def event_generator():
         q = asyncio.Queue(maxsize=150)
-        vehicle_subscribers[v_type].add(q)
+        vehicle_subscribers.add(q)
         try:
-            # 1. Send Initial Snapshot for this specific type ONLY
-            snapshot = [v for v in current_vehicles.values() if v.get("type") == v_type]
-            if snapshot:
-                yield f"data: {json.dumps({'type': 'vehicles', 'vehicle_type': v_type, 'data': snapshot})}\n\n"
+            # 1. Send Initial Snapshot of ALL vehicles
+            if current_vehicles:
+                snapshot = list(current_vehicles.values())
+                yield f"data: {json.dumps({'type': 'vehicles', 'data': snapshot})}\n\n"
             else:
                 # Immediate keep-alive to flush headers if no data
                 yield ": keep-alive\n\n"
@@ -400,7 +394,7 @@ async def categorical_sse(request: Request, v_type: str):
         except asyncio.CancelledError:
             pass
         finally:
-            vehicle_subscribers[v_type].discard(q)
+            vehicle_subscribers.discard(q)
 
     return StreamingResponse(
         event_generator(),
