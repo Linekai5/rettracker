@@ -13,8 +13,6 @@
   let selectedId = null;
   let focusInterval = null;
   
-  // Removed filter state
-  
   const vehicleState = new Map(); // Map<id, Vehicle>
   const routeGeometries = {}; // route_id -> MultiLineString
   const resolvedCache = new Map(); // rid + hint -> geometry
