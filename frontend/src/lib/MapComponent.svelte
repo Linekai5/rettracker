@@ -123,7 +123,7 @@
   async function fetchVehicleUpdate(id) {
       if (!id) return;
       try {
-          const response = await fetch(`/vehicles/${id}`);
+          const response = await fetch(`${API_BASE}/vehicles/${id}`);
           if (response.ok) {
               const vData = await response.json();
               if (vData.id && vehicleState.has(vData.id)) {
@@ -188,7 +188,7 @@ async function stopVehicleStream() {
   async function startVehicleStream() {
       if (sseConnection) return; // Already running
 
-      const url = `/vehicles-sse`;
+      const url = `${API_BASE}/vehicles-sse`;
       console.log(`Connecting to Unified Vehicle SSE:`, url);
 
       const evtSource = new EventSource(url);
