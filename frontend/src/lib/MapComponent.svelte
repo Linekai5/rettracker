@@ -54,27 +54,35 @@
       
       if (resolvedCache.has(cacheKey)) return resolvedCache.get(cacheKey);
 
-      let found = null;
+      let foundEntry = null;
       let minDist = Infinity;
       let bestRef = null;
       const vPt = [vData.lon, vData.lat];
       
+      // Helper: Check type compatibility (e.g. don't snap Bus to Tram line)
+      const isCompat = (entry) => {
+          if (!entry.type || !vData.type) return true;
+          return entry.type === vData.type;
+      };
+      
       // -- Step 1: Exact Matches (Most Accurate) --
-      if (hint && routeGeometries[hint]) {
-          found = routeGeometries[hint];
-      } else if (rid && routeGeometries[rid]) {
-          found = routeGeometries[rid];
+      if (hint && routeGeometries[hint] && isCompat(routeGeometries[hint])) {
+          foundEntry = routeGeometries[hint];
+      } else if (rid && routeGeometries[rid] && isCompat(routeGeometries[rid])) {
+          foundEntry = routeGeometries[rid];
       } else if (METRO_MAPPING[hint] && routeGeometries[METRO_MAPPING[hint]]) {
-          found = routeGeometries[METRO_MAPPING[hint]];
+          foundEntry = routeGeometries[METRO_MAPPING[hint]];
       }
       
       // -- Step 2: Spatial Match (Search within names first) --
-      // If we have a hint like "25", only search lines including "25" for best performance and accuracy
-      if (!found && hint) {
-          for (const [ref, geom] of Object.entries(routeGeometries)) {
+      if (!foundEntry && hint) {
+          for (const [ref, entry] of Object.entries(routeGeometries)) {
+              if (!isCompat(entry)) continue;
+
               if (ref.includes(hint) || hint.includes(ref)) {
                   try {
-                      const snapped = turf.nearestPointOnLine(geom, vPt);
+                      // Access .geom because routeGeometries stores { geom, type }
+                      const snapped = turf.nearestPointOnLine(entry.geom, vPt);
                       if (snapped && snapped.properties.dist < minDist) {
                           minDist = snapped.properties.dist;
                           bestRef = ref;
@@ -82,33 +90,35 @@
                   } catch(e) {}
               }
           }
-          if (bestRef && minDist < 0.5) found = routeGeometries[bestRef];
+          if (bestRef && minDist < 0.5) foundEntry = routeGeometries[bestRef];
       }
       
       // -- Step 3: Global Spatial Search (Aggressive Clipping) --
-      // If still not found, search the ENTIRE network for the closest line within 1km
-      if (!found) {
+      if (!foundEntry) {
           minDist = Infinity;
           bestRef = null;
-          for (const [ref, geom] of Object.entries(routeGeometries)) {
+          for (const [ref, entry] of Object.entries(routeGeometries)) {
+              if (!isCompat(entry)) continue;
+              
               try {
-                  const snapped = turf.nearestPointOnLine(geom, vPt);
+                  const snapped = turf.nearestPointOnLine(entry.geom, vPt);
                   if (snapped && snapped.properties.dist < minDist) {
                       minDist = snapped.properties.dist;
                       bestRef = ref;
                   }
               } catch(e) {}
           }
-          // Threshold: 2.0 km - very aggressive backup to ensure clipping
+          // Threshold: 2.0 km - very aggressive backup
           if (bestRef && minDist < 2.0) {
-              found = routeGeometries[bestRef];
+              foundEntry = routeGeometries[bestRef];
           }
       }
       
-      if (found) {
-        resolvedCache.set(cacheKey, found);
+      if (foundEntry) {
+        resolvedCache.set(cacheKey, foundEntry.geom);
+        return foundEntry.geom;
       }
-      return found;
+      return null;
   }
 
   async function fetchVehicleUpdate(id) {
