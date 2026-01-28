@@ -19,11 +19,9 @@
   const routeGeometries = {}; // route_id -> MultiLineString
   const resolvedCache = new Map(); // rid + hint -> geometry
   
-  // Use relative URLs if in production, or localhost during development
-  // This avoids 404s if the frontend is hit from a different domain or port
-  const API_BASE = (browser && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) 
-      ? 'http://localhost:8000' 
-      : 'https://rettrack.dfelix.systems';
+  // Use relative URLs to leverage Vite proxy in dev (works in Codespaces)
+  // In production, this allows serving frontend/backend from same origin or via reverse proxy
+  const API_BASE = ''; 
 
   // Mapping from internal RET Metro lineage to public identifiers
   const METRO_MAPPING = {
@@ -127,7 +125,7 @@
   async function fetchVehicleUpdate(id) {
       if (!id) return;
       try {
-          const response = await fetch(`${API_BASE}/vehicles/${id}`);
+          const response = await fetch(`/vehicles/${id}`);
           if (response.ok) {
               const vData = await response.json();
               if (vData.id && vehicleState.has(vData.id)) {
@@ -192,7 +190,7 @@ async function stopVehicleStream() {
   async function startVehicleStream() {
       if (sseConnection) return; // Already running
 
-      const url = `${API_BASE}/vehicles-sse`;
+      const url = `/vehicles-sse`;
       console.log(`Connecting to Unified Vehicle SSE:`, url);
 
       const evtSource = new EventSource(url);
