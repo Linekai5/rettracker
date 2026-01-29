@@ -1,0 +1,16 @@
+nohup: ignoring input
+INFO:     Started server process [53771]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+✓ 1845 updates → 0 clients
+✓ 23 updates → 0 clients
+INFO:     127.0.0.1:57506 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57522 - "GET /vehicles HTTP/1.1" 200 OK
+✓ 8 updates → 0 clients
+INFO:     127.0.0.1:57538 - "GET /vehicles-sse HTTP/1.1" 200 OK
+✓ 17 updates → 0 clients
+INFO:     127.0.0.1:41264 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41276 - "GET /vehicles HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41282 - "GET /vehicles-sse HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41284 - "GET /vehicles HTTP/1.1" 200 OK

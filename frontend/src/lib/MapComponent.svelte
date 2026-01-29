@@ -93,7 +93,7 @@
     vehicles.forEach(v => {
       // Handle both old "id" and new keys if needed, preferring standard keys
       const id = v.id || v.entity_id;
-      if (!id) return;
+      if (!id || !v.lat || !v.lon) return; // Skip invalid vehicles
 
       if (vehicleMarkers.has(id)) {
         // --- FAST PATH: UPDATE EXISTING ---
@@ -105,7 +105,7 @@
         marker.setLngLat([v.lon, v.lat]);
         
         // Update rotation (bearing) efficiently via direct DOM access
-        if (markerData.arrowElement) {
+        if (markerData.arrowElement && v.bearing !== undefined) {
             markerData.arrowElement.style.transform = `rotate(${v.bearing}deg)`;
         }
 
