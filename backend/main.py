@@ -14,13 +14,33 @@ import concurrent.futures
 FETCH_INTERVAL_VEHICLES = 1.0  
 FETCH_INTERVAL_STOPS = 10.0
 
-# ✅ FIX 1: Use the specific RET feed (Faster, less junk data)
+# OVAPI Aggregated Feeds
 URL_VEHICLES = "http://gtfs.ovapi.nl/new/vehiclePositions.pb" 
 URL_TRIP_UPDATES = "http://gtfs.ovapi.nl/new/tripUpdates.pb"
 
-# Rotterdam Area Bounding Box (Slightly widened to catch edge cases)
-bbox_min_lat, bbox_max_lat = 51.4, 52.4
-bbox_min_lon, bbox_max_lon = 3.6, 5.0
+# --- LAYER 1: Geographic Scope (MRDH Region) ---
+# Covers: Hoek van Holland (West), Den Haag (North), Dordrecht (South), Capelle (East)
+# This box captures the full length of Metro E and Metro B.
+AREA_MIN_LAT = 51.70  
+AREA_MAX_LAT = 52.15  
+AREA_MIN_LON = 3.90   
+AREA_MAX_LON = 4.85   
+
+# --- LAYER 2: Known RET Route IDs ---
+# We allow these specific Line IDs regardless of agency label
+RET_METRO_LINES = {"A", "B", "C", "D", "E"}
+RET_TRAM_LINES = {"2", "4", "6", "7", "8", "20", "21", "23", "24", "25"}
+
+# --- LAYER 3: Known RET Fleet Series ---
+# Range checks for vehicle numbers
+def is_ret_fleet_number(vid_str):
+    if not vid_str.isdigit(): return False
+    vid = int(vid_str)
+    # Trams: 2000 series
+    if 2000 <= vid <= 2299: return True
+    # Metros: 5000 series (Type MG2/1, SG2/1, RSG3, SG3, HSG3)
+    if 5000 <= vid <= 5899: return True
+    return False
 
 # --- Global State ---
 current_vehicles = {} 
@@ -45,48 +65,57 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
     feed = gtfs_realtime_pb2.FeedMessage()
     try:
         feed.ParseFromString(content)
-    except Exception as e:
-        print(f"Protobuf Parse Error: {e}")
+    except:
         return {}, []
 
     updates = []
     new_state = {}
     current_time = time.time()
-
+    
     for entity in feed.entity:
         if not entity.HasField('vehicle'): continue
         
-        v_id = str(entity.id)
+        v = entity.vehicle
+        pos = v.position
+        v_id = str(entity.id).replace("RET:", "") # Normalize ID
         
-        # ✅ FIX 2: Relaxed Filtering
-        # If the ID doesn't contain RET, we assume it's not ours and skip it.
-        # But we check multiple fields to be sure.
-        is_ret = "RET" in v_id.upper() or "RET" in entity.vehicle.trip.route_id.upper()
+        # --- FILTER 1: Geography ---
+        # If it's not even close to Rotterdam/Den Haag, skip it immediately.
+        if not pos.latitude or not pos.longitude: continue
+        if abs(pos.latitude) < 1.0: continue
+        if not (AREA_MIN_LAT <= pos.latitude <= AREA_MAX_LAT and AREA_MIN_LON <= pos.longitude <= AREA_MAX_LON):
+            continue
+
+        # --- FILTER 2 & 3: Identity Verification ---
+        is_ret = False
+        
+        # Clean Route ID (Remove "RET:" prefix, remove "M" prefix if like "M-A")
+        raw_route = v.trip.route_id.upper().replace("RET:", "")
+        clean_route = raw_route
+        if "-" in clean_route: clean_route = clean_route.split("-")[-1] # Handle "M-A" -> "A"
+        
+        # Check A: Explicit Agency Label in ID
+        if "RET" in str(entity.id).upper() or "RET" in v.trip.route_id.upper():
+            is_ret = True
+        
+        # Check B: Route Allow List
+        elif clean_route in RET_METRO_LINES or clean_route in RET_TRAM_LINES:
+            is_ret = True
+
+        # Check C: Fleet Number Ranges
+        elif is_ret_fleet_number(v_id):
+             is_ret = True
+        
+        # Strict Rejection: If it didn't pass A, B, or C, it's likely an EBS/Connexxion bus
         if not is_ret:
             continue
 
-        v = entity.vehicle
-        pos = v.position
-        
-        # Basic GPS Check
-        if not pos.latitude or not pos.longitude: continue
-        if abs(pos.latitude) < 1.0: continue
-
-        # Bounding Box (Kept wide)
-        if not (bbox_min_lat <= pos.latitude <= bbox_max_lat and bbox_min_lon <= pos.longitude <= bbox_max_lon):
-            continue
-
-        # --- Type Detection ---
-        route_id = v.trip.route_id.upper()
+        # --- Type Assignment ---
         v_type = "bus" # Default
         
-        # RET Route Logic
-        if "METRO" in route_id or route_id.startswith("RET:M"):
+        if clean_route in RET_METRO_LINES or (is_ret_fleet_number(v_id) and int(v_id) > 5000):
             v_type = "metro"
-        elif "TRAM" in route_id:
-            v_type = "tram"
-        # Heuristic: Short route IDs (e.g. "23") are often Trams in Rotterdam
-        elif len(route_id) > 4 and route_id[4:].isdigit() and int(route_id[4:]) < 30:
+        elif clean_route in RET_TRAM_LINES or (is_ret_fleet_number(v_id) and int(v_id) < 3000):
             v_type = "tram"
 
         # --- Headsign ---
@@ -100,7 +129,6 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
         speed = 0.0
         if v_id in old_vehicles:
             prev = old_vehicles[v_id]
-            # Persist Headsign
             if headsign == "Unknown" and prev["headsign"] != "Unknown":
                 headsign = prev["headsign"]
             
@@ -114,7 +142,7 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
         if pos.speed > 0: speed = pos.speed * 3.6
         if speed > 130.0: speed = 0.0 
 
-        label = v.vehicle.label if v.vehicle.label else v_id.split(':')[-1]
+        label = v.vehicle.label if v.vehicle.label else v_id
         
         data = {
             "id": v_id,
@@ -130,7 +158,6 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
             "timestamp": int(v.timestamp if v.timestamp else current_time)
         }
 
-        # Change Detection (Reduced threshold to ensure updates flow)
         if v_id in old_vehicles:
             old = old_vehicles[v_id]
             if (abs(old["lat"] - data["lat"]) > 0.000001 or abs(old["lon"] - data["lon"]) > 0.000001):
@@ -143,7 +170,6 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
     return new_state, updates
 
 def parse_stops(content, current_time):
-    # (Kept simple to avoid blocking)
     feed = gtfs_realtime_pb2.FeedMessage()
     try:
         feed.ParseFromString(content)
@@ -154,9 +180,14 @@ def parse_stops(content, current_time):
     for entity in feed.entity:
         if not entity.HasField('trip_update'): continue
         tu = entity.trip_update
-        if "RET" not in tu.trip.trip_id: continue
         
-        # Grab headsign from trip update to feed into vehicle list
+        # Use same Loose Filter for Stops to ensure we get headsigns
+        if "RET" not in tu.trip.trip_id and "RET" not in tu.trip.route_id:
+             # Try simple route check
+             r = tu.trip.route_id.upper().replace("RET:", "")
+             if r not in RET_METRO_LINES and r not in RET_TRAM_LINES:
+                 continue
+
         hs = None
         if tu.trip.HasField('trip_headsign'): hs = tu.trip.trip_headsign
         elif tu.stop_time_update:
@@ -183,15 +214,12 @@ async def vehicle_worker():
                     )
                     current_vehicles = new_vehicles
                     
-                    # ✅ FIX 3: Force send updates if we have active vehicles, even if small changes
                     if updates and vehicle_subscribers:
                         msg = json.dumps({"type": "vehicles", "data": updates})
                         for q in list(vehicle_subscribers):
                             if not q.full(): q.put_nowait(msg)
-                else:
-                    print(f"Fetch failed: {resp.status_code}")
-            except Exception as e:
-                print(f"Error: {e}")
+            except Exception:
+                pass
             await asyncio.sleep(FETCH_INTERVAL_VEHICLES)
 
 async def stop_worker():
@@ -241,8 +269,6 @@ async def vehicles_sse(request: Request):
         q = asyncio.Queue(maxsize=100)
         vehicle_subscribers.add(q)
         try:
-            # ✅ FIX 4: Send IMMEDIATE snapshot upon connection
-            # If current_vehicles is empty, we send an empty list just to confirm connection works
             snapshot = list(current_vehicles.values())
             yield f"data: {json.dumps({'type': 'vehicles', 'data': snapshot})}\n\n"
 
@@ -264,6 +290,6 @@ async def vehicles_sse(request: Request):
         headers={
             "Cache-Control": "no-cache", 
             "Connection": "keep-alive", 
-            "X-Accel-Buffering": "no" # Critical for Nginx/Cloudflare
+            "X-Accel-Buffering": "no"
         },
     )
