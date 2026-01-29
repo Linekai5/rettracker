@@ -13,9 +13,9 @@ import concurrent.futures
 # --- Configuration ---
 FETCH_INTERVAL_VEHICLES = 1.0  
 FETCH_INTERVAL_STOPS = 10.0
-# We use the Agency-specific endpoint for speed
-URL_VEHICLES = "http://gtfs.ovapi.nl/ret/vehiclePositions.pb"
-URL_TRIP_UPDATES = "http://gtfs.ovapi.nl/ret/tripUpdates.pb"
+# We use the General NL endpoint bc agency-specific is unreliable
+URL_VEHICLES = "http://gtfs.ovapi.nl/nl/vehiclePositions.pb"
+URL_TRIP_UPDATES = "http://gtfs.ovapi.nl/nl/tripUpdates.pb"
 
 # Rotterdam Area Bounding Box (Safety filter)
 bbox_min_lat, bbox_max_lat = 51.5, 52.3
@@ -46,7 +46,7 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 
 def parse_vehicles(content, old_vehicles, trip_headsigns):
     """
-    Parses vehicle positions from the RET-specific feed.
+    Parses vehicle positions from the General NL feed.
     """
     feed = gtfs_realtime_pb2.FeedMessage()
     try:
@@ -66,34 +66,31 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
         pos = v.position
         v_id = str(entity.id)
         
-        # Valid Coordinates Check
+        # 1. Bounding Box Filter (Critical for NL feed)
         if not pos.latitude or not pos.longitude: continue
-        if abs(pos.latitude) < 1: continue
-
-        # Simple Bounding Box (Since we are using RET feed, we trust the entities are mostly RET)
         if not (bbox_min_lat <= pos.latitude <= bbox_max_lat and bbox_min_lon <= pos.longitude <= bbox_max_lon):
             continue
-            
-        # --- Type & Line Logic ---
+
+        # 2. Type Inference Helper
         route_id = v.trip.route_id.upper()
+        label = v.vehicle.label if v.vehicle.label else v_id.split(':')[-1]
         v_type = "bus" # Default
-        
-        # Heuristic to detect Metro vs Tram based on Route ID
-        # RET Metros: "RET:METRO:A", "A", "B", etc.
-        # RET Trams: "RET:TRAM:25", "25", etc.
-        if "METRO" in route_id or route_id in ["A","B","C","D","E"] or route_id.startswith("M-"):
-            v_type = "metro"
-        elif "TRAM" in route_id or (len(route_id) > 0 and route_id[0].isdigit() and int(route_id.split(':')[0].split('-')[0]) < 30):
-             # Simple heuristic: if it starts with digit < 30 (Trycatch safe)
-             try:
-                 num = int(route_id.split(':')[0].split('-')[0])
-                 if num < 30: v_type = "tram"
-             except:
-                 pass
-        
-        if "FERRY" in route_id or "WB" in route_id:
-            v_type = "ferry"
-        
+
+        try:
+            # Try to infer type from label (vehicle number)
+            # RET specific logic:
+            if label.isdigit():
+                num = int(label)
+                if 5000 <= num <= 5800: v_type = "metro"
+                elif 2000 <= num <= 2200: v_type = "tram"
+            
+            # Fallback to route_id analysis
+            if v_type == "bus":
+                if "METRO" in route_id or route_id.startswith("M-"): v_type = "metro"
+                elif "TRAM" in route_id: v_type = "tram"
+        except:
+            pass
+
         # --- DESTINATION HUNTING ---
         headsign = trip_headsigns.get(v.trip.trip_id, "")
         
