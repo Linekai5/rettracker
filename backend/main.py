@@ -1,161 +1,118 @@
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from contextlib import asynccontextmanager
 import httpx
 import asyncio
 import json
 import time
-import concurrent.futures
+import random
 
-# --- CONFIGURATION ---
-# Switching to the JSON API (v0)
-# This returns a dictionary of ALL vehicles in NL.
-URL_POSITIONS = "http://v0.ovapi.nl/pos/"
+app = FastAPI()
 
-# --- STATE ---
-current_vehicles = {} 
-last_update_time = 0
+current_vehicles = {}
+last_fetch_time = 0
+FETCH_INTERVAL = 3.0       # Elke 5s – snel en veilig
+BATCH_SIZE = 40            # Veilige batch
+ALLOWED_TYPES = {"TRAM", "METRO", "BUS"}  # Alles wat je wilt (pas aan)
 
-process_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+async def vehicle_updates():
+    global current_vehicles, last_fetch_time
 
-def parse_json_job(content):
-    """
-    Parses the OVAPI v0 JSON.
-    Format: { "RET_1234_1": { "Lat": 51.9, "Lon": 4.4, "Velocity": 10, ... }, ... }
-    """
-    try:
-        raw_data = json.loads(content)
-    except:
-        return {}
-
-    new_state = {}
-    timestamp = int(time.time())
-    
-    found_count = 0
-
-    # Iterate over every vehicle in the Netherlands
-    for key, v in raw_data.items():
-        # --- THE MAGIC FILTER ---
-        # The keys usually look like "RET_M009_1" or "RET_25_2"
-        # We just check if "RET" is in the key string.
-        if "RET" not in key.upper():
-            continue
-            
-        found_count += 1
-        
-        # Extract Lat/Lon directly
-        lat = v.get("Lat")
-        lon = v.get("Long") # Note: v0 uses 'Long', not 'Lon'
-        
-        if not lat or not lon: continue
-
-        # --- SMART LABELING ---
-        # Key format is typically AGENCY_LINE_VARIANT (e.g. RET_23_1)
-        parts = key.split('_')
-        label = "RET"
-        v_type = "bus"
-        
-        # Try to grab the middle part (Line Number)
-        if len(parts) >= 2:
-            raw_line = parts[1] # "23", "M009"
-            label = raw_line
-            
-            # Metro
-            if raw_line.startswith("M") or raw_line in ["A", "B", "C", "D", "E"]:
-                v_type = "metro"
-            # Tram (Numbers 1-29)
-            elif raw_line.isdigit() and int(raw_line) < 30:
-                v_type = "tram"
-        
-        # Destination is often in 'DestinationName'
-        headsign = v.get("DestinationName", "Unknown")
-
-        # Create unique ID (Use the key)
-        v_id = key
-
-        new_state[v_id] = {
-            "id": v_id,
-            "label": label,
-            "headsign": headsign,
-            "type": v_type,
-            "lat": float(lat),
-            "lon": float(lon),
-            "bearing": int(v.get("Bearing", 0)),
-            "speed": float(v.get("Velocity", 0)), # v0 gives km/h directly usually
-            "timestamp": timestamp
-        }
-
-    print(f"✅ Processed v0 JSON. Found {found_count} RET vehicles.", flush=True)
-    return new_state
-
-# --- WORKER ---
-async def fetch_loop():
-    global current_vehicles, last_update_time
-    
-    # v0 is fast, but let's be polite. 5s refresh is standard for JSON APIs.
-    limits = httpx.Limits(max_keepalive_connections=5)
-    async with httpx.AsyncClient(verify=False, limits=limits, timeout=30.0) as client:
+    # verify=False om SSL mismatch te fixen
+    async with httpx.AsyncClient(verify=False, timeout=30.0, follow_redirects=True) as client:
         while True:
-            try:
-                # print("⬇️ Fetching v0 JSON...", flush=True)
-                resp = await client.get(URL_POSITIONS)
-                if resp.status_code == 200:
-                    loop = asyncio.get_running_loop()
-                    current_vehicles = await loop.run_in_executor(
-                        process_pool, parse_json_job, resp.content
-                    )
-                    last_update_time = time.time()
-                else:
-                    print(f"❌ API Error: {resp.status_code}", flush=True)
-            except Exception as e:
-                print(f"❌ Network Error: {e}", flush=True)
-            
-            # v0 cache is usually ~10s, so pulling every 2s is safe
-            await asyncio.sleep(2.0)
+            updates = []
+            now = time.time()
 
-# --- APP ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    task = asyncio.create_task(fetch_loop())
-    yield
-    task.cancel()
-    process_pool.shutdown()
+            if now - last_fetch_time >= FETCH_INTERVAL:
+                try:
+                    resp_keys = await client.get("https://v0.ovapi.nl/journey/")
+                    resp_keys.raise_for_status()
 
-app = FastAPI(lifespan=lifespan)
+                    journey_keys = [k for k in resp_keys.json().keys() if k.startswith("RET_")]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+                    if not journey_keys:
+                        print("Geen RET journeys")
+                        await asyncio.sleep(2.0)
+                        continue
 
-@app.get("/")
-def index():
-    return {"status": "RET Tracker (v0 API)", "vehicles": len(current_vehicles)}
+                    new_vehicles = {}
+                    print(f"Haal {len(journey_keys)} RET journeys op...")
+
+                    for i in range(0, len(journey_keys), BATCH_SIZE):
+                        batch = journey_keys[i:i + BATCH_SIZE]
+                        url = f"https://v0.ovapi.nl/journey/{','.join(batch)}"
+
+                        try:
+                            resp = await client.get(url)
+                            resp.raise_for_status()
+                            journeys = resp.json()
+
+                            for journey_id, journey in journeys.items():
+                                stops = journey.get("Stops", {})
+                                for stop_id, stop in stops.items():
+                                    transport_type = stop.get("TransportType")
+
+                                    if transport_type not in ALLOWED_TYPES:
+                                        continue
+
+                                    if stop.get("TripStopStatus") in ("DRIVING", "ARRIVED", "DEPARTING"):
+                                        vehicle = {
+                                            "id": f"{journey_id}_{stop_id}",
+                                            "lat": stop.get("Latitude"),
+                                            "lon": stop.get("Longitude"),
+                                            "line": stop.get("LinePublicNumber"),
+                                            "bearing": stop.get("SideCode", 0),
+                                            "speed": stop.get("Speed", 0),
+                                            "type": transport_type,  # TRAM, METRO, BUS
+                                            "destination": stop.get("DestinationName50"),
+                                            "last_update": stop.get("LastUpdateTimeStamp"),  # Timestamp!
+                                            "delay": stop.get("DelayInSeconds", 0),
+                                            "direction": stop.get("Direction", "?"),
+                                        }
+
+                                        new_vehicles[vehicle["id"]] = vehicle
+
+                                        if (
+                                            vehicle["id"] not in current_vehicles
+                                            or current_vehicles[vehicle["id"]] != vehicle
+                                        ):
+                                            updates.append(vehicle)
+
+                        except Exception as e:
+                            print(f"Batch mislukt: {url} → {str(e)}")
+
+                        await asyncio.sleep(0.15)
+
+                    current_vehicles = new_vehicles
+                    last_fetch_time = now
+                    print(f"Update klaar - {len(updates)} veranderd")
+
+                except Exception as e:
+                    print(f"Hoofd fetch fout: {str(e)}")
+
+            if updates:
+                yield f"data: {json.dumps({'updates': updates})}\n\n"
+
+            sleep_time = FETCH_INTERVAL + random.uniform(-1.0, 1.0)
+            await asyncio.sleep(max(1.0, sleep_time))
+
 
 @app.get("/vehicles-sse")
 async def vehicles_sse(request: Request):
-    async def event_generator():
-        while True:
-            if await request.is_disconnected(): break
-            
-            data = list(current_vehicles.values())
-            
-            # Send Data + Last Update Timestamp
-            msg = {
-                "type": "vehicles",
-                "last_updated": last_update_time,
-                "data": data
-            }
-            
-            if data:
-                yield f"data: {json.dumps(msg)}\n\n"
-            else:
-                yield ": keep-alive\n\n"
-                
-            await asyncio.sleep(1.0)
+    return StreamingResponse(
+        vehicle_updates(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.get("/")
+async def root():
+    return {
+        "message": "RET Tram/Metro/Bus Tracker – live elke ~8s"
+    }
