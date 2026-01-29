@@ -9,14 +9,14 @@ import json
 import time
 import math
 import concurrent.futures
-import sys
 
 # --- Configuration ---
-# Use the robust NL feed
+# Using the NL feed (Proven to work in Diagnostic)
 URL_VEHICLES = "http://gtfs.ovapi.nl/nl/vehiclePositions.pb" 
 URL_TRIP_UPDATES = "http://gtfs.ovapi.nl/nl/tripUpdates.pb"
 
-# Rotterdam/Den Haag Region
+# Rotterdam & Den Haag Region
+# If a vehicle is in this box, we show it. No questions asked.
 AREA_MIN_LAT = 51.70  
 AREA_MAX_LAT = 52.15  
 AREA_MIN_LON = 3.90   
@@ -51,7 +51,7 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
     new_state = {}
     current_time = time.time()
     
-    ret_count = 0
+    count_total = 0
     
     for entity in feed.entity:
         if not entity.HasField('vehicle'): continue
@@ -59,49 +59,48 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
         v = entity.vehicle
         pos = v.position
         
-        # 1. Geographic Filter
+        # 1. Geographic Filter (The ONLY strict filter)
         if not pos.latitude or not pos.longitude: continue
         if abs(pos.latitude) < 1.0: continue
         if not (AREA_MIN_LAT <= pos.latitude <= AREA_MAX_LAT and AREA_MIN_LON <= pos.longitude <= AREA_MAX_LON):
             continue
-
-        # 2. ID Parsing (The key to fixing this)
-        # Format: "2026-01-29:RET:15:159272"
+        
+        count_total += 1
+        
+        # 2. Extract Info (No filtering, just extraction)
         v_id_str = str(entity.id)
         parts = v_id_str.split(':')
         
-        # We only want RET
-        if "RET" not in parts: 
-            continue
-            
-        ret_count += 1
-
-        # Extract Line Number
-        try:
-            ret_index = parts.index("RET")
-            raw_line = parts[ret_index + 1] # "15", "M009"
-        except IndexError:
-            raw_line = "Unknown"
-
-        # 3. Type Logic
+        # Default State
         v_type = "bus"
-        clean_line = raw_line.upper().strip()
+        line_label = "Unknown"
+        is_ret = "RET" in parts
         
-        # Metros: M009, A, B, C...
-        if clean_line.startswith("M") or clean_line in ["A", "B", "C", "D", "E"]:
-            v_type = "metro"
-        # Trams: Numeric < 30 (e.g. 15, 23, 25)
-        elif clean_line.isdigit() and int(clean_line) < 30:
-            v_type = "tram"
+        # Try to parse line number for display
+        # ID Example: "2026-01-29:RET:15:159272"
+        if is_ret:
+            try:
+                idx = parts.index("RET")
+                if idx + 1 < len(parts):
+                    raw_line = parts[idx+1].upper().strip() # "15", "M009"
+                    line_label = raw_line
+                    
+                    # Determine Type (Metro/Tram/Bus)
+                    if raw_line.startswith("M") or raw_line in ["A", "B", "C", "D", "E"]:
+                        v_type = "metro"
+                    elif raw_line.isdigit() and int(raw_line) < 30:
+                        v_type = "tram"
+            except:
+                pass
         
-        # Headsign
+        # 3. Headsign Logic
         headsign = trip_headsigns.get(v.trip.trip_id, "")
         if not headsign and v.trip.HasField('trip_headsign'):
             headsign = v.trip.trip_headsign
         if not headsign:
             headsign = "Unknown"
 
-        # Speed
+        # 4. Speed Logic
         speed = 0.0
         if v_id_str in old_vehicles:
             prev = old_vehicles[v_id_str]
@@ -119,7 +118,7 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
 
         data = {
             "id": v_id_str,
-            "label": clean_line,
+            "label": line_label,
             "lat": round(pos.latitude, 6),
             "lon": round(pos.longitude, 6),
             "bearing": round(pos.bearing, 1),
@@ -127,10 +126,12 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
             "trip_id": v.trip.trip_id,
             "route_id": v.trip.route_id,
             "headsign": headsign,
-            "type": v_type,
+            "type": v_type, # metro, tram, bus
+            "agency": "RET" if is_ret else "External",
             "timestamp": int(v.timestamp if v.timestamp else current_time)
         }
 
+        # Change Detection
         if v_id_str in old_vehicles:
             old = old_vehicles[v_id_str]
             if (abs(old["lat"] - data["lat"]) > 0.000001 or abs(old["lon"] - data["lon"]) > 0.000001):
@@ -140,12 +141,12 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
 
         new_state[v_id_str] = data
 
-    print(f"✅ Processed: Found {ret_count} RET vehicles in area.", flush=True)
+    print(f"✅ Vehicles in Zone: {count_total} (Streaming to Frontend)", flush=True)
     return new_state, updates
 
 def parse_stops(content, current_time):
-    feed = gtfs_realtime_pb2.FeedMessage()
     try:
+        feed = gtfs_realtime_pb2.FeedMessage()
         feed.ParseFromString(content)
     except:
         return {}, {}, []
@@ -154,8 +155,8 @@ def parse_stops(content, current_time):
     for entity in feed.entity:
         if not entity.HasField('trip_update'): continue
         tu = entity.trip_update
-        if "RET" not in tu.trip.trip_id: continue
-
+        
+        # Capture headsigns for everything
         hs = None
         if tu.trip.HasField('trip_headsign'): hs = tu.trip.trip_headsign
         elif tu.stop_time_update:
@@ -169,12 +170,11 @@ def parse_stops(content, current_time):
 
 async def vehicle_worker():
     global current_vehicles, trip_headsigns
-    # INCREASED TIMEOUT TO 30s
+    # HIGH TIMEOUT (30s) prevents "0 vehicles" error on slow download
     limits = httpx.Limits(max_keepalive_connections=5)
     async with httpx.AsyncClient(verify=False, limits=limits) as client:
         while True:
             try:
-                print("⬇️ Fetching vehicles...", flush=True)
                 resp = await client.get(URL_VEHICLES, timeout=30.0)
                 if resp.status_code == 200:
                     loop = asyncio.get_running_loop()
@@ -188,11 +188,11 @@ async def vehicle_worker():
                         for q in list(vehicle_subscribers):
                             if not q.full(): q.put_nowait(msg)
                 else:
-                    print(f"❌ HTTP Error: {resp.status_code}", flush=True)
+                    print(f"❌ API Error: {resp.status_code}")
             except Exception as e:
-                print(f"❌ Worker Exception: {e}", flush=True)
+                print(f"❌ Worker Error: {e}")
             
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.0)
 
 async def stop_worker():
     global trip_headsigns
@@ -241,7 +241,6 @@ async def vehicles_sse(request: Request):
         q = asyncio.Queue(maxsize=100)
         vehicle_subscribers.add(q)
         try:
-            # Force send current state
             snapshot = list(current_vehicles.values())
             yield f"data: {json.dumps({'type': 'vehicles', 'data': snapshot})}\n\n"
 
