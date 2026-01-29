@@ -302,7 +302,7 @@ app.add_middleware(
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Optimized Backend with Headsigns Running"}
+    return {"status": "ok", "message": "Optimized Backend with Headsigns Running gooood"}
 
 @app.get("/vehicles-sse")
 async def vehicles_sse(request: Request):
