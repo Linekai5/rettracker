@@ -58,9 +58,16 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
         if not entity.HasField('vehicle'): continue
         
         v_id = str(entity.id)
-        # Filter for RET entities
-        if "RET" not in v_id.upper() and "RET" not in entity.vehicle.trip.route_id.upper():
-            continue
+        
+        # Broad filter: Check ID, Trip, Route for RET tag
+        # Also include generic 'Metro' or 'Tram' if in bounding box
+        search_str = (v_id + str(entity.vehicle.trip.route_id) + str(entity.vehicle.trip.trip_id)).upper()
+        if "RET" not in search_str:
+             # Fallback: If it's explicitly a Metro in Rotterdam, take it
+             if "METRO" in search_str and bbox_min_lat <= entity.vehicle.position.latitude <= bbox_max_lat:
+                 pass
+             else:
+                 continue
 
         v = entity.vehicle
         pos = v.position
@@ -216,13 +223,18 @@ async def vehicle_worker():
         while True:
             start_time = time.time()
             try:
-                resp = await client.get("http://gtfs.ovapi.nl/new/vehiclePositions.pb", timeout=5.0)
+                # Use main NL feed
+                resp = await client.get("http://gtfs.ovapi.nl/nl/vehiclePositions.pb", timeout=6.0)
                 if resp.status_code == 200:
                     loop = asyncio.get_running_loop()
-                    # Offload to thread to prevent lag
                     new_vehicles, updates = await loop.run_in_executor(
                         process_pool, parse_vehicles, resp.content, current_vehicles, trip_headsigns
                     )
+                    
+                    # Log status locally
+                    if len(new_vehicles) > 0:
+                        print(f"Tracking {len(new_vehicles)} RET vehicles.", end='\r')
+                    
                     current_vehicles = new_vehicles
                     
                     if updates and vehicle_subscribers:
