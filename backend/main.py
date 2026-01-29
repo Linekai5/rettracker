@@ -8,390 +8,309 @@ import asyncio
 import json
 import time
 import math
-
+import concurrent.futures
 
 # --- Configuration ---
-# Vehicles update often (locations). Reduced to 1.0s for faster feel.
 FETCH_INTERVAL_VEHICLES = 1.0  
-# Stops update less often (ETAs)
 FETCH_INTERVAL_STOPS = 10.0
-# Only process entities with IDs containing this string
 AGENCY_FILTER = "RET"
 
-# Known Active Tram Lines for Strict Detection
-# Updated to match user-verified list + known frequent lines
-# Explicitly: 2, 4, 6, 7, 8, 20, 21, 23, 24, 25 (from user image)
-KNOWN_TRAM_LINES = {
-    "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"
-}
-
-# Rotterdam Area Bounding Box (Approx)
-# Filter out GPS errors (0,0) or wild drifts
+# Rotterdam Area Bounding Box
 bbox_min_lat, bbox_max_lat = 51.5, 52.3
 bbox_min_lon, bbox_max_lon = 3.8, 4.9
 
 # --- Global State ---
-# Map: vehicle_id -> { id, lat, lon, bearing, speed, trip_id, ... }
 current_vehicles = {} 
-# Map: stop_id -> { id, deps: [ { route, dest, time, delay, trip_id } ] }
 current_stops = {}
-# Map: trip_id -> headsign
-trip_headsigns = {}
+trip_headsigns = {} # Stores: trip_id -> "Slinge", "Den Haag Centraal", etc.
 
-# List of queues for connected clients
-# Unified subscriber set for all vehicles
+# Subscribers
 vehicle_subscribers = set()
 stop_subscribers = set()
 
-async def fetch_gtfs_feed(client, url):
-    """Fetches and parses a GTFS-Realtime feed."""
-    try:
-        resp = await client.get(url)
-        if resp.status_code == 200:
-            feed = gtfs_realtime_pb2.FeedMessage()
-            feed.ParseFromString(resp.content)
-            return feed
-    except Exception as e:
-        print(f"Error fetching {url}: {e}")
-    return None
-
-def is_ret_entity(entity):
-    """Checks if the entity belongs to RET."""
-    # Broaden filter to ensure full fleet visibility
-    # Check ID, Trip Route ID, or Label
-    s_id = str(entity.id).upper()
-    if "RET" in s_id: return True
-    
-    # Deep inspection for mixed agency feeds
-    if entity.HasField('vehicle'):
-        v = entity.vehicle
-        if v.trip.route_id.startswith('RET:'): return True
-        # Check for numeric-only lines that might be RET trams but missing prefix
-        if v.trip.route_id in KNOWN_TRAM_LINES: return True
-        
-    if entity.HasField('trip_update'):
-        t = entity.trip_update
-        if t.trip.route_id.startswith('RET:'): return True
-        
-    return False
+# Thread Pool (Keeps the main loop fast)
+process_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 def haversine_distance(lat1, lon1, lat2, lon2):
-    """
-    Calculate the great circle distance between two points 
-    on the earth (specified in decimal degrees) in meters.
-    """
-    R = 6371000  # Radius of Earth in meters
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
+    R = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
     delta_lambda = math.radians(lon2 - lon1)
-    
-    a = math.sin(delta_phi / 2.0) ** 2 + \
-        math.cos(phi1) * math.cos(phi2) * \
-        math.sin(delta_lambda / 2.0) ** 2
+    a = math.sin(delta_phi / 2.0)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(delta_lambda/2.0)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    
     return R * c
 
+# --- PARSING LOGIC (Run in separate threads) ---
+
+def parse_vehicles(content, old_vehicles, trip_headsigns):
+    """
+    Parses vehicle positions.
+    Crucially, it merges the 'Headsign' (Destination) we found in the other feed.
+    """
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.ParseFromString(content)
+
+    updates = []
+    new_state = {}
+    current_time = time.time()
+
+    for entity in feed.entity:
+        if not entity.HasField('vehicle'): continue
+        
+        v_id = str(entity.id)
+        # Filter for RET entities
+        if "RET" not in v_id.upper() and "RET" not in entity.vehicle.trip.route_id.upper():
+            continue
+
+        v = entity.vehicle
+        pos = v.position
+        
+        if not pos.latitude or not pos.longitude: continue
+        if abs(pos.latitude) < 1: continue
+
+        # Bounding Box
+        if not (bbox_min_lat <= pos.latitude <= bbox_max_lat and bbox_min_lon <= pos.longitude <= bbox_max_lon):
+            continue
+            
+        # --- Type & Line Logic ---
+        route_id = v.trip.route_id.upper()
+        v_type = "bus" # Default fallback
+        
+        # Heuristic to detect Metro vs Tram based on Route ID
+        if "METRO" in route_id or route_id.startswith("RET:M"):
+            v_type = "metro"
+        elif "TRAM" in route_id or (len(route_id) > 4 and route_id[4:].isdigit() and int(route_id[4:]) < 30):
+            v_type = "tram"
+        
+        # --- DESTINATION HUNTING ---
+        # 1. Check if we already found the name in the TripUpdates feed (Best Source)
+        headsign = trip_headsigns.get(v.trip.trip_id, "")
+        
+        # 2. If not, check if this feed has it explicitly
+        if not headsign and v.trip.HasField('trip_headsign'):
+            headsign = v.trip.trip_headsign
+            
+        # 3. If still empty, use a placeholder so frontend doesn't crash
+        if not headsign:
+            headsign = "Unknown"
+
+        # Speed Calc
+        speed = 0.0
+        if v_id in old_vehicles:
+            prev = old_vehicles[v_id]
+            # Keep previous headsign if we lose it temporarily
+            if headsign == "Unknown" and prev["headsign"] != "Unknown":
+                headsign = prev["headsign"]
+            
+            ts_diff = v.timestamp - prev["timestamp"]
+            if ts_diff > 0:
+                dist = haversine_distance(prev["lat"], prev["lon"], pos.latitude, pos.longitude)
+                speed = dist / ts_diff
+            else:
+                speed = prev["speed"]
+        
+        if pos.speed > 0: speed = pos.speed
+        if speed > 36.0: speed = 0.0 
+
+        # Clean Label (e.g., "RET:Metro:D" -> "D")
+        label = v.vehicle.label if v.vehicle.label else v_id.split(':')[-1]
+        
+        data = {
+            "id": v_id,
+            "label": label,          # "D", "23", "E"
+            "lat": round(pos.latitude, 6),
+            "lon": round(pos.longitude, 6),
+            "bearing": round(pos.bearing, 1),
+            "speed": round(speed, 1),
+            "trip_id": v.trip.trip_id,
+            "route_id": v.trip.route_id,
+            "headsign": headsign,    # "De Akkers", "Slinge", "Centraal Station"
+            "type": v_type,          # "metro", "tram", "bus"
+            "timestamp": int(v.timestamp if v.timestamp else current_time)
+        }
+
+        # Change Detection
+        if v_id in old_vehicles:
+            old = old_vehicles[v_id]
+            if (old["lat"] != data["lat"] or old["lon"] != data["lon"]):
+                updates.append(data)
+        else:
+            updates.append(data)
+
+        new_state[v_id] = data
+
+    return new_state, updates
+
+def parse_stops(content, current_time):
+    """
+    Parses trip updates to find ETAs and, crucially, DESTINATIONS.
+    """
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.ParseFromString(content)
+    
+    new_stops = {}
+    new_headsigns = {} # We collect destination names here
+    stop_updates_list = []
+
+    for entity in feed.entity:
+        if not entity.HasField('trip_update'): continue
+        tu = entity.trip_update
+        
+        if "RET" not in tu.trip.trip_id and "RET" not in tu.trip.route_id:
+            continue
+
+        trip_id = tu.trip.trip_id
+        route_id = tu.trip.route_id
+        
+        # --- EXTRACT HEADSIGN (DESTINATION) ---
+        found_headsign = None
+        
+        # Priority 1: Explicit Trip Header
+        if tu.trip.HasField('trip_headsign'):
+            found_headsign = tu.trip.trip_headsign
+            
+        # Priority 2: The headsign of the LAST stop in the list
+        if not found_headsign and tu.stop_time_update:
+            last_stop = tu.stop_time_update[-1]
+            if last_stop.HasField('stop_headsign'):
+                found_headsign = last_stop.stop_headsign
+        
+        if found_headsign:
+            new_headsigns[trip_id] = found_headsign
+
+        # --- Process Stops ---
+        for stu in tu.stop_time_update:
+            arrival_time = stu.arrival.time if stu.arrival.time else stu.departure.time
+            
+            # Filter valid times (Now-5m to Now+60m)
+            if not (current_time - 300 < arrival_time < current_time + 3600):
+                continue
+
+            stop_id = stu.stop_id
+            if stop_id not in new_stops:
+                new_stops[stop_id] = {"id": stop_id, "buses": []}
+            
+            new_stops[stop_id]["buses"].append({
+                "trip_id": trip_id,
+                "route_id": route_id,
+                "headsign": found_headsign if found_headsign else "Unknown",
+                "time": arrival_time,
+                "delay": stu.arrival.delay if stu.arrival.HasField('delay') else 0
+            })
+
+    # Sort and trim
+    for s_id in new_stops:
+        new_stops[s_id]["buses"].sort(key=lambda x: x["time"])
+        new_stops[s_id]["buses"] = new_stops[s_id]["buses"][:5]
+        stop_updates_list.append(new_stops[s_id])
+
+    return new_stops, new_headsigns, stop_updates_list
+
+# --- ASYNC WORKERS ---
+
 async def vehicle_worker():
-    """Fetches VehiclePositions via HTTP Polling."""
     global current_vehicles, trip_headsigns
     
-    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-    async with httpx.AsyncClient(verify=False, timeout=10.0, limits=limits) as client:
+    limits = httpx.Limits(max_keepalive_connections=5)
+    async with httpx.AsyncClient(verify=False, limits=limits) as client:
         while True:
             start_time = time.time()
-            feed = await fetch_gtfs_feed(client, "http://gtfs.ovapi.nl/new/vehiclePositions.pb")
-            
-            all_updates = []
-            found_ret_entities = False
-            
-            if feed:
-                for entity in feed.entity:
-                    if not entity.HasField('vehicle'):
-                        continue
-                    if not is_ret_entity(entity):
-                        continue
+            try:
+                resp = await client.get("http://gtfs.ovapi.nl/new/vehiclePositions.pb", timeout=5.0)
+                if resp.status_code == 200:
+                    loop = asyncio.get_running_loop()
+                    # Offload to thread to prevent lag
+                    new_vehicles, updates = await loop.run_in_executor(
+                        process_pool, parse_vehicles, resp.content, current_vehicles, trip_headsigns
+                    )
+                    current_vehicles = new_vehicles
                     
-                    found_ret_entities = True
-                    v = entity.vehicle
-                    pos = v.position
-                    v_id = entity.id 
-                    label = v.vehicle.label if v.vehicle.label else v_id.split(':')[-1]
-                    
-                    lat = pos.latitude
-                    lon = pos.longitude
-                    
-                    # Basic 0,0 check
-                    if not lat or not lon or (abs(lat) < 1 and abs(lon) < 1):
-                        continue
-                    
-                    # Rotterdam Bounding Box Filter
-                    if not (bbox_min_lat <= lat <= bbox_max_lat and bbox_min_lon <= lon <= bbox_max_lon):
-                        continue
+                    if updates and vehicle_subscribers:
+                        msg = json.dumps({"type": "vehicles", "data": updates})
+                        for q in list(vehicle_subscribers):
+                            if not q.full(): q.put_nowait(msg)
 
-                    ts = v.timestamp if v.timestamp else int(time.time())
-                    
-                    headsign = trip_headsigns.get(v.trip.trip_id, "")
-                    if not headsign:
-                        try:
-                            if v.trip.HasField('trip_headsign'):
-                                headsign = v.trip.trip_headsign
-                        except:
-                            pass
-                    
-                    v_type = "bus" # Default
-                    parts = v_id.split(':')
-                    line_hint = ""
-                    if len(parts) >= 3:
-                        if parts[1] == "RET": line_hint = parts[2]
-                        elif parts[0] == "RET": line_hint = parts[1]
-                    
-                    if line_hint:
-                        lh_upper = line_hint.upper()
-                        if lh_upper in ["A", "B", "C", "D", "E"] or lh_upper.startswith("M"):
-                            v_type = "metro"
-                        elif lh_upper in KNOWN_TRAM_LINES:
-                            v_type = "tram"
-                    
-                    # 2. Check Route ID as fallback
-                    if v_type == "bus" and v.trip.route_id:
-                        rid = v.trip.route_id.upper()
-                        if any(m in rid for m in ["METRO", "M006", "M007", "M008", "M009", "M010"]):
-                            v_type = "metro"
-                        elif "TRAM" in rid:
-                            v_type = "tram"
-                        elif rid in KNOWN_TRAM_LINES:
-                            v_type = "tram"
-                    
-                    # 3. Label Fallback (e.g. "Line C")
-                    if v_type == "bus" and line_hint:
-                         # Sometimes line hint is just the letter/number
-                         if line_hint in ["A", "B", "C", "D", "E"]: 
-                             v_type = "metro"
-
-                    speed = 0.0
-                    if v_id in current_vehicles:
-                        prev = current_vehicles[v_id]
-                        # Persistence for headsign
-                        if not headsign and prev["headsign"]:
-                            headsign = prev["headsign"]
-
-                        if ts > prev["timestamp"]:
-                            dist = haversine_distance(prev["lat"], prev["lon"], lat, lon)
-                            speed = dist / (ts - prev["timestamp"])
-                        else:
-                            speed = prev["speed"]
-                    
-                    if pos.HasField('speed') and pos.speed > 0:
-                        speed = pos.speed
-                    
-                    if speed > 36.0: speed = 0.0
-
-                    vehicle_data = {
-                        "id": v_id,
-                        "label": label,
-                        "lat": round(lat, 6),
-                        "lon": round(lon, 6),
-                        "bearing": round(pos.bearing, 1) if pos.HasField('bearing') else 0,
-                        "speed": round(speed, 1),
-                        "trip_id": v.trip.trip_id,
-                        "route_id": v.trip.route_id,
-                        "headsign": headsign,
-                        "type": v_type,
-                        "line_hint": line_hint,
-                        "timestamp": ts
-                    }
-                    
-                    # Diff Check
-                    changed = True
-                    if v_id in current_vehicles:
-                        old = current_vehicles[v_id]
-                        if (old["lat"] == vehicle_data["lat"] and 
-                            old["lon"] == vehicle_data["lon"] and 
-                            old["bearing"] == vehicle_data["bearing"]):
-                            changed = False
-                    
-                    # Update Global State
-                    current_vehicles[v_id] = vehicle_data
-
-                    if changed:
-                        all_updates.append(vehicle_data)
-
-            # Cleanup Stale Vehicles (TTL 60s)
-            now = time.time()
-            stale_keys = [k for k, v in current_vehicles.items() if (now - v['timestamp']) > 60]
-            for k in stale_keys:
-                del current_vehicles[k]
-                
-            # Broadcast updates
-            if all_updates and vehicle_subscribers:
-                msg = json.dumps({"type": "vehicles", "data": all_updates})
-                for q in list(vehicle_subscribers):
-                    try:
-                        q.put_nowait(msg)
-                    except asyncio.QueueFull:
-                        pass
+            except Exception as e:
+                print(f"Vehicle fetch error: {e}")
 
             elapsed = time.time() - start_time
-            await asyncio.sleep(max(0.1, FETCH_INTERVAL_VEHICLES - elapsed))
+            await asyncio.sleep(max(0.5, FETCH_INTERVAL_VEHICLES - elapsed))
 
 async def stop_worker():
-    """Fetches TripUpdates and calculates Stop ETAs."""
     global current_stops, trip_headsigns
     
-    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-    async with httpx.AsyncClient(verify=False, timeout=15.0, limits=limits, headers={"User-Agent": "RETTracker/1.0"}) as client:
+    limits = httpx.Limits(max_keepalive_connections=5)
+    async with httpx.AsyncClient(verify=False, limits=limits, headers={"User-Agent": "RETTracker/2.0"}) as client:
         while True:
             start_time = time.time()
-            new_stops = {} # map: stop_id -> { id: stop_id, departures: [] }
-            stop_updates_list = []
-
-            feed = await fetch_gtfs_feed(client, "http://gtfs.ovapi.nl/new/tripUpdates.pb")
-            
-            if feed:
-                for entity in feed.entity:
-                    if not entity.HasField('trip_update'):
-                        continue
-                    if not is_ret_entity(entity):
-                        continue
+            try:
+                resp = await client.get("http://gtfs.ovapi.nl/new/tripUpdates.pb", timeout=10.0)
+                if resp.status_code == 200:
+                    loop = asyncio.get_running_loop()
+                    # Offload to thread
+                    new_stops, new_headsigns, updates = await loop.run_in_executor(
+                        process_pool, parse_stops, resp.content, start_time
+                    )
                     
-                    tu = entity.trip_update
-                    trip_id = tu.trip.trip_id
-                    route_id = tu.trip.route_id
+                    current_stops = new_stops
+                    trip_headsigns.update(new_headsigns) # Sync destinations to global map
                     
-                    # Try to find terminus/headsign in StopTimeUpdates
-                    # The last stop headsign is usually the destination
-                    if tu.stop_time_update:
-                        last_stu = tu.stop_time_update[-1]
-                        if last_stu.HasField('stop_headsign'):
-                            trip_headsigns[trip_id] = last_stu.stop_headsign
-                        elif tu.trip.HasField('trip_headsign'): # some producers use this
-                            trip_headsigns[trip_id] = tu.trip.trip_headsign
+                    if updates and stop_subscribers:
+                        msg = json.dumps({"type": "stops", "data": updates})
+                        for q in list(stop_subscribers):
+                            if not q.full(): q.put_nowait(msg)
 
-                    # Iterate through stop updates in this trip
-                    for stu in tu.stop_time_update:
-                        stop_id = stu.stop_id
-                        
-                        # We want arrival (or departure if arrival missing)
-                        # GTFS-RT times are POSIX timestamps
-                        arrival_time = stu.arrival.time if stu.arrival.time else stu.departure.time
-                        delay = stu.arrival.delay if stu.arrival.HasField('delay') else 0
-                        
-                        # Filter out old/passed stops (older than 5 mins ago?)
-                        # Assuming server time is synced.
-                        now = time.time()
-                        if arrival_time < now - 300: # data might be slightly old, keep 5 min buffer
-                            continue
-                        
-                        # Filter out too far future? (e.g. > 60 mins)
-                        if arrival_time > now + 3600:
-                            continue
-
-                        if stop_id not in new_stops:
-                            new_stops[stop_id] = {
-                                "id": stop_id,
-                                "buses": []
-                            }
-                        
-                        new_stops[stop_id]["buses"].append({
-                            "trip_id": trip_id,
-                            "route_id": route_id,
-                            "time": arrival_time,
-                            "delay": delay
-                        })
-
-                # Post-process: sort and slice
-                for stop_id, data in new_stops.items():
-                    # Sort buses by arrival time
-                    data["buses"].sort(key=lambda x: x["time"])
-                    # Keep only next 5 most relevant
-                    data["buses"] = data["buses"][:5]
-                    
-                    # Diff check
-                    if stop_id not in current_stops or current_stops[stop_id] != data:
-                        stop_updates_list.append(data)
-                
-                # Update global
-                current_stops = new_stops
-                
-                # Broadcast
-                if stop_updates_list and stop_subscribers:
-                    msg = json.dumps({"type": "stops", "data": stop_updates_list})
-                    for q in list(stop_subscribers):
-                        try:
-                            q.put_nowait(msg)
-                        except asyncio.QueueFull:
-                            pass
+            except Exception as e:
+                print(f"Stop fetch error: {e}")
 
             elapsed = time.time() - start_time
             await asyncio.sleep(max(1.0, FETCH_INTERVAL_STOPS - elapsed))
 
-# --- Lifecycle Manager ---
+# --- APP LIFECYCLE ---
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     t1 = asyncio.create_task(vehicle_worker())
     t2 = asyncio.create_task(stop_worker())
     yield
-    # Shutdown
     t1.cancel()
     t2.cancel()
-
+    process_pool.shutdown()
 
 app = FastAPI(lifespan=lifespan)
 
-# --- CORS Configuration ---
-origins = [
-    "https://www.rettracker.nl",
-    "https://rettracker.nl",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
-
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Public API: Allow everyone
-    allow_credentials=False, # Disable credentials to allow wildcard origin
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Backend is running and CORS is configured open."}
-
-
-@app.get("/vehicles/{vehicle_id}")
-async def get_vehicle(vehicle_id: str):
-    if vehicle_id in current_vehicles:
-        return current_vehicles[vehicle_id]
-    return {"error": "Vehicle not found", "id": vehicle_id}
+    return {"status": "ok", "message": "Optimized Backend with Headsigns Running"}
 
 @app.get("/vehicles-sse")
 async def vehicles_sse(request: Request):
-    """Unified stream for all vehicles."""
     async def event_generator():
-        q = asyncio.Queue(maxsize=150)
+        q = asyncio.Queue(maxsize=100)
         vehicle_subscribers.add(q)
         try:
-            # 1. Send Initial Snapshot of ALL vehicles
             if current_vehicles:
-                snapshot = list(current_vehicles.values())
-                yield f"data: {json.dumps({'type': 'vehicles', 'data': snapshot})}\n\n"
+                yield f"data: {json.dumps({'type': 'vehicles', 'data': list(current_vehicles.values())})}\n\n"
             else:
-                # Immediate keep-alive to flush headers if no data
                 yield ": keep-alive\n\n"
 
             while True:
                 if await request.is_disconnected(): break
                 try:
-                    # Wait for data or timeout (heartbeat)
                     data = await asyncio.wait_for(q.get(), timeout=5.0)
                     yield f"data: {data}\n\n"
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
-        except asyncio.CancelledError:
+        except Exception:
             pass
         finally:
             vehicle_subscribers.discard(q)
@@ -399,11 +318,7 @@ async def vehicles_sse(request: Request):
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
 @app.get("/stops-sse")
@@ -412,17 +327,13 @@ async def stops_sse(request: Request):
         q = asyncio.Queue(maxsize=50)
         stop_subscribers.add(q)
         try:
-            # 1. Send Snapshot (Chunked)
             if current_stops:
                 all_stops = list(current_stops.values())
-                chunk_size = 50
-                for i in range(0, len(all_stops), chunk_size):
-                    chunk = all_stops[i:i + chunk_size]
-                    yield f"data: {json.dumps({'type': 'stops', 'data': chunk})}\n\n"
+                # Send in small chunks
+                for i in range(0, len(all_stops), 50):
+                    yield f"data: {json.dumps({'type': 'stops', 'data': all_stops[i:i+50]})}\n\n"
                     await asyncio.sleep(0.01)
-            else:
-                 yield ": keep-alive\n\n"
-
+            
             while True:
                 if await request.is_disconnected(): break
                 try:
@@ -430,7 +341,7 @@ async def stops_sse(request: Request):
                     yield f"data: {data}\n\n"
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
-        except asyncio.CancelledError:
+        except Exception:
             pass
         finally:
             stop_subscribers.discard(q)
@@ -438,18 +349,5 @@ async def stops_sse(request: Request):
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
-
-@app.get("/")
-async def root():
-    return {
-        "status": "GTFS-Realtime Broadcaster Active",
-        "vehicles_tracked": len(current_vehicles),
-        "stops_with_predictions": len(current_stops),
-        "clients": len(vehicle_subscribers) + len(stop_subscribers)
-    }
