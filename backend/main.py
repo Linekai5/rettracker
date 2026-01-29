@@ -11,40 +11,28 @@ import math
 import concurrent.futures
 
 # --- Configuration ---
-# EXACT URLs that work
+# 1. Use the URL that we PROVED works
 URL_VEHICLES = "http://gtfs.ovapi.nl/nl/vehiclePositions.pb" 
-URL_TRIP_UPDATES = "http://gtfs.ovapi.nl/nl/tripUpdates.pb"
 
-# EXACT Bounding Box that works
+# 2. Use the Area Box that we PROVED works
 AREA_MIN_LAT = 51.70  
 AREA_MAX_LAT = 52.15  
 AREA_MIN_LON = 3.90   
 AREA_MAX_LON = 4.85   
 
-# Global State
 current_vehicles = {} 
-trip_headsigns = {} # Re-enabled headsigns
 process_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
-def haversine_distance(lat1, lon1, lat2, lon2):
-    R = 6371000
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    delta_phi = math.radians(lat2 - lat1)
-    delta_lambda = math.radians(lon2 - lon1)
-    a = math.sin(delta_phi / 2.0)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(delta_lambda/2.0)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
-
-def parse_vehicles(content, old_vehicles, trip_headsigns):
+def parse_vehicles(content):
     """
-    Enhanced Diagnostic Parser.
-    Keeps the "Open Gates" logic but adds smart labeling.
+    The Robust Parser. 
+    Accepts any vehicle in the box. No strict filtering.
     """
     feed = gtfs_realtime_pb2.FeedMessage()
     try:
         feed.ParseFromString(content)
     except Exception as e:
-        print(f"❌ Parse Error: {e}")
+        print(f"❌ CRITICAL: Failed to parse Protobuf: {e}")
         return {}
 
     new_state = {}
@@ -56,159 +44,83 @@ def parse_vehicles(content, old_vehicles, trip_headsigns):
         v = entity.vehicle
         pos = v.position
         
-        # 1. Geographic Filter ONLY (Keep this strict!)
+        # 1. Geographic Filter ONLY (This is the Safety Net)
         if not pos.latitude or not pos.longitude: continue
         if abs(pos.latitude) < 1.0: continue
-        if not (AREA_MIN_LAT <= pos.latitude <= AREA_MAX_LAT and 
-                AREA_MIN_LON <= pos.longitude <= AREA_MAX_LON):
-            continue
+        
+        if (AREA_MIN_LAT <= pos.latitude <= AREA_MAX_LAT and 
+            AREA_MIN_LON <= pos.longitude <= AREA_MAX_LON):
             
-        v_id_str = str(entity.id)
-        
-        # 2. Smart ID Parsing (The Upgrade)
-        # We transform "2026-01-29:RET:15:159272" -> Label "15", Type "Tram"
-        parts = v_id_str.split(':')
-        
-        v_type = "bus"      # Default
-        label = "Unknown"   # Default
-        is_ret = False
-
-        # Check if it is RET based on ID string
-        if "RET" in parts:
-            is_ret = True
-            try:
-                # The label is usually the item right after "RET"
-                idx = parts.index("RET")
-                if idx + 1 < len(parts):
-                    raw = parts[idx+1].upper().strip() # "15", "M009"
-                    label = raw
-                    
-                    # Type Logic
-                    if raw.startswith("M") or raw in ["A", "B", "C", "D", "E"]:
-                        v_type = "metro"
-                    elif raw.isdigit() and int(raw) < 30:
-                        v_type = "tram"
-                    else:
-                        v_type = "bus"
-            except:
-                pass
-        else:
-            # If it's QBUZZ/EBS/HTM, just mark it External so frontend colors it Gray
-            label = v.trip.route_id # Fallback
-        
-        # 3. Headsign Logic
-        headsign = trip_headsigns.get(v.trip.trip_id, "")
-        if not headsign and v.trip.HasField('trip_headsign'):
-            headsign = v.trip.trip_headsign
-        if not headsign:
-            headsign = "Unknown"
-
-        # 4. Speed Logic (Smoother movement)
-        speed = 0.0
-        bearing = pos.bearing
-        
-        if v_id_str in old_vehicles:
-            prev = old_vehicles[v_id_str]
-            # Persist headsign if we lose it
-            if headsign == "Unknown" and prev["headsign"] != "Unknown":
-                headsign = prev["headsign"]
+            v_id = str(entity.id)
+            parts = v_id.split(':')
             
-            ts_diff = int(current_time) - prev["timestamp"] # Use local time diff
-            if ts_diff > 0:
-                dist = haversine_distance(prev["lat"], prev["lon"], pos.latitude, pos.longitude)
-                speed = dist / ts_diff
-            else:
-                speed = prev["speed"]
-        
-        if pos.speed > 0: speed = pos.speed * 3.6 # Convert m/s to km/h
+            # --- SIMPLE TYPE DETECTION (Safe) ---
+            # Default to bus
+            v_type = "bus"
+            label = v.trip.route_id
+            
+            # If ID contains RET, try to grab the line number
+            if "RET" in parts:
+                try:
+                    # ID format: DATE:RET:LINE:VEHICLE
+                    idx = parts.index("RET")
+                    if idx + 1 < len(parts):
+                        raw = parts[idx+1]
+                        label = raw # "15", "M009"
+                        
+                        # Logic: Metros start with M, Trams are < 30
+                        if raw.startswith("M") or raw in ["A","B","C","D","E"]:
+                            v_type = "metro"
+                        elif raw.isdigit() and int(raw) < 30:
+                            v_type = "tram"
+                except:
+                    pass
 
-        # 5. Build Final Data
-        data = {
-            "id": v_id_str,
-            "label": label,          # "15", "E", "33"
-            "lat": round(pos.latitude, 6),
-            "lon": round(pos.longitude, 6),
-            "bearing": round(bearing, 1),
-            "speed": round(speed, 1),
-            "headsign": headsign,    # "Centraal Station"
-            "type": v_type,          # "tram", "metro", "bus"
-            "agency": "RET" if is_ret else "External",
-            "timestamp": int(current_time)
-        }
-        
-        new_state[v_id_str] = data
+            # Extract basic info
+            data = {
+                "id": v_id,
+                "label": label,
+                "lat": round(pos.latitude, 6),
+                "lon": round(pos.longitude, 6),
+                "heading": pos.bearing,
+                "type": v_type, 
+                "timestamp": int(current_time)
+            }
+            
+            new_state[v_id] = data
 
     return new_state
 
-def parse_stops(content):
-    """Fetches headsigns for the popup."""
-    try:
-        feed = gtfs_realtime_pb2.FeedMessage()
-        feed.ParseFromString(content)
-        new_headsigns = {}
-        for entity in feed.entity:
-            if not entity.HasField('trip_update'): continue
-            tu = entity.trip_update
-            
-            hs = None
-            if tu.trip.HasField('trip_headsign'): hs = tu.trip.trip_headsign
-            elif tu.stop_time_update:
-                last = tu.stop_time_update[-1]
-                if last.HasField('stop_headsign'): hs = last.stop_headsign
-            
-            if hs: new_headsigns[tu.trip.trip_id] = hs
-        return new_headsigns
-    except:
-        return {}
-
-# --- WORKERS ---
-
+# --- WORKER ---
 async def vehicle_worker():
-    global current_vehicles, trip_headsigns
+    global current_vehicles
+    # 10s Timeout + Loop Protection
     limits = httpx.Limits(max_keepalive_connections=5)
     async with httpx.AsyncClient(verify=False, limits=limits) as client:
         while True:
             try:
-                # Using the URL that WORKED
+                # print("⬇️ Fetching data...", flush=True) 
                 resp = await client.get(URL_VEHICLES, timeout=10.0)
                 if resp.status_code == 200:
                     loop = asyncio.get_running_loop()
-                    # Parse in background
-                    new_vehicles = await loop.run_in_executor(
-                        process_pool, parse_vehicles, resp.content, current_vehicles, trip_headsigns
-                    )
+                    new_vehicles = await loop.run_in_executor(process_pool, parse_vehicles, resp.content)
                     current_vehicles = new_vehicles
-                    print(f"✅ Vehicles Updated: {len(current_vehicles)} found")
+                    # Only print once every few seconds to confirm it's alive
+                    if len(new_vehicles) > 0:
+                         print(f"✅ Active: {len(new_vehicles)} vehicles tracked.", end='\r')
                 else:
-                    print(f"❌ HTTP Error: {resp.status_code}")
+                    print(f"❌ Fetch failed: Status {resp.status_code}")
             except Exception as e:
-                print(f"❌ Worker Error: {e}")
+                print(f"❌ Error in worker: {e}")
             
             await asyncio.sleep(1.0)
 
-async def stop_worker():
-    global trip_headsigns
-    async with httpx.AsyncClient(verify=False) as client:
-        while True:
-            try:
-                resp = await client.get(URL_TRIP_UPDATES, timeout=20.0)
-                if resp.status_code == 200:
-                    loop = asyncio.get_running_loop()
-                    new_heads = await loop.run_in_executor(process_pool, parse_stops, resp.content)
-                    trip_headsigns.update(new_heads)
-            except:
-                pass
-            await asyncio.sleep(15.0)
-
 # --- APP ---
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     t1 = asyncio.create_task(vehicle_worker())
-    t2 = asyncio.create_task(stop_worker())
     yield
     t1.cancel()
-    t2.cancel()
     process_pool.shutdown()
 
 app = FastAPI(lifespan=lifespan)
@@ -230,21 +142,12 @@ async def vehicles_sse(request: Request):
     async def event_generator():
         while True:
             if await request.is_disconnected(): break
-            # Stream the full list every 1s (Proven to work)
+            # ALWAYS send data if we have it
             data = list(current_vehicles.values())
             if data:
                 yield f"data: {json.dumps({'type': 'vehicles', 'data': data})}\n\n"
             else:
-                yield ": keep-alive\n\n"
-            
+                 yield ": keep-alive\n\n"
             await asyncio.sleep(1.0)
             
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache", 
-            "Connection": "keep-alive", 
-            "X-Accel-Buffering": "no"
-        },
-    )
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
