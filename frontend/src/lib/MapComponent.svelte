@@ -1,291 +1,411 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import maplibregl from 'maplibre-gl';
-  import 'maplibre-gl/dist/maplibre-gl.css';
+  import { initMap } from './map.js';
+  import { browser, dev } from '$app/environment';
+  import { Vehicle } from './Vehicle.js';
+  // Removed direct import to avoid bundling 2.4MB JSON
+  // import retData from '$lib/assets/ret_network.json';
+  import * as turf from '@turf/turf';
 
-  let mapContainer;
+  let mapElement;
   let map;
-  let eventSource;
+  let sseConnection = null;
+  let selectedId = null;
+  let focusInterval = null;
   
-  // Direct Map storage for performance (bypass Svelte reactivity system)
-  const vehicleMarkers = new Map(); 
+  const vehicleState = new Map(); // Map<id, Vehicle>
+  const routeGeometries = {}; // route_id -> MultiLineString
+  const resolvedCache = new Map(); // rid + hint -> geometry
+  
+  // Use relative URLs to leverage Vite proxy in dev (works in Codespaces)
+  // In production, fallback to the external backend URL
+  const API_BASE = dev ? '' : 'https://rettrack.dfelix.systems'; 
 
-  // RET Official-ish Colors
-  const COLORS = {
-    metro: '#00AFDB', // RET Blue/Cyan
-    tram: '#009E4D',  // RET Green (Alternative: Red #E30613)
-    bus: '#6E6E6E',   // Dark Gray
-    ferry: '#f39c12',
-    default: '#333333'
+  // Mapping from internal RET Metro lineage to public identifiers
+  const METRO_MAPPING = {
+      "M006": "E",
+      "M007": "C",
+      "M008": "A",
+      "M009": "B",
+      "M010": "D"
   };
 
-  // Helper to extract clean line numbers (e.g. from "RET:SUB:M-E" -> "E")
-  function parseLine(routeId) {
-    if (!routeId) return '?';
-    const parts = routeId.split(':');
-    let line = parts[parts.length - 1]; 
-    if (line.startsWith('M-')) line = line.substring(2); // Fix M-E -> E
-    return line;
+  const VehicleTypeColors = {
+      bus: '#808080',
+      tram: '#D100AA',
+      metro: '#00a1de' // Will be overridden by specific metro color if matched
+  };
+
+  function resolveGeometry(vData) {
+      if (!vData || !vData.lat || !vData.lon) return null;
+      
+      const rid = vData.route_id || "";
+      const hint = vData.line_hint || "";
+      const cacheKey = `${rid}_${hint}`;
+      
+      if (resolvedCache.has(cacheKey)) return resolvedCache.get(cacheKey);
+
+      let foundEntry = null;
+      let minDist = Infinity;
+      let bestRef = null;
+      const vPt = [vData.lon, vData.lat];
+      
+      // Helper: Check type compatibility (e.g. don't snap Bus to Tram line)
+      const isCompat = (entry) => {
+          // Strict Validation: If types are defined, they MUST match.
+          // If the track has no type, we assume it's generic (unlikely for colored tracks).
+          // If vehicle has no type, we can't be strict, but we shouldn't snap to specific tracks like Metro.
+          if (entry.type && vData.type) {
+              return entry.type === vData.type;
+          }
+          // If strictly one is missing, prevent mixing Metro/Tram/Bus accidentally
+          // Assuming all entries have types (bus, tram, metro)
+          if (entry.type) return false; 
+          return true;
+      };
+      
+      // -- Step 1: Exact Matches (Most Accurate) --
+      if (hint && routeGeometries[hint] && isCompat(routeGeometries[hint])) {
+          foundEntry = routeGeometries[hint];
+      } else if (rid && routeGeometries[rid] && isCompat(routeGeometries[rid])) {
+          foundEntry = routeGeometries[rid];
+      } else if (METRO_MAPPING[hint] && routeGeometries[METRO_MAPPING[hint]]) {
+          foundEntry = routeGeometries[METRO_MAPPING[hint]];
+      }
+      
+      // -- Step 2: Spatial Match (Search within names first) --
+      if (!foundEntry && hint) {
+          for (const [ref, entry] of Object.entries(routeGeometries)) {
+              if (!isCompat(entry)) continue;
+
+              if (ref.includes(hint) || hint.includes(ref)) {
+                  try {
+                      // Access .geom because routeGeometries stores { geom, type }
+                      const snapped = turf.nearestPointOnLine(entry.geom, vPt);
+                      if (snapped && snapped.properties.dist < minDist) {
+                          minDist = snapped.properties.dist;
+                          bestRef = ref;
+                      }
+                  } catch(e) {}
+              }
+          }
+          if (bestRef && minDist < 0.5) foundEntry = routeGeometries[bestRef];
+      }
+      
+      // -- Step 3: Global Spatial Search (Aggressive Clipping) --
+      if (!foundEntry) {
+          minDist = Infinity;
+          bestRef = null;
+          for (const [ref, entry] of Object.entries(routeGeometries)) {
+              if (!isCompat(entry)) continue;
+              
+              try {
+                  const snapped = turf.nearestPointOnLine(entry.geom, vPt);
+                  if (snapped && snapped.properties.dist < minDist) {
+                      minDist = snapped.properties.dist;
+                      bestRef = ref;
+                  }
+              } catch(e) {}
+          }
+          // Threshold: 0.5 km - stricter backup to avoid snapping to wrong parallel lines
+          if (bestRef && minDist < 0.5) {
+              foundEntry = routeGeometries[bestRef];
+          }
+      }
+      
+      if (foundEntry) {
+        resolvedCache.set(cacheKey, foundEntry.geom);
+        return foundEntry.geom;
+      }
+      return null;
   }
 
-  onMount(() => {
-    map = new maplibregl.Map({
-      container: mapContainer,
-      // Positron is lightweight and high-performance
-      style: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
-      center: [4.4777, 51.9244], // Rotterdam Centraal
-      zoom: 12,
-      pitch: 0,
-      bearing: 0,
-      antialias: true
+  async function fetchVehicleUpdate(id) {
+      if (!id) return;
+      try {
+          const response = await fetch(`${API_BASE}/vehicles/${id}`);
+          if (response.ok) {
+              const vData = await response.json();
+              if (vData.id && vehicleState.has(vData.id)) {
+                  const v = vehicleState.get(vData.id);
+                  if (!v.hasRouteGeometry()) {
+                        const geom = resolveGeometry(vData);
+                        if (geom) v.setRouteGeometry(geom);
+                  }
+                  v.update(vData);
+              }
+          }
+      } catch (err) {
+          console.error("Error fetching focused vehicle", err);
+      }
+  }
+
+  function handleSelect(id) {
+      if (selectedId === id) {
+          // Deselect current
+          if (vehicleState.has(selectedId)) {
+              vehicleState.get(selectedId).setSelected(false);
+          }
+          selectedId = null;
+          if (focusInterval) {
+             clearInterval(focusInterval);
+             focusInterval = null;
+          }
+          return;
+      }
+      
+      // Update visual for old selection
+      if (selectedId && vehicleState.has(selectedId)) {
+          vehicleState.get(selectedId).setSelected(false);
+      }
+
+      selectedId = id;
+      
+      // Update visual for new selection
+      if (vehicleState.has(id)) {
+          vehicleState.get(id).setSelected(true);
+      }
+      
+      // Immediate fetch
+      fetchVehicleUpdate(id);
+      
+      // High frequency polling for the focused vehicle (1s)
+      if (focusInterval) clearInterval(focusInterval);
+      focusInterval = setInterval(() => fetchVehicleUpdate(id), 1000); 
+  }
+
+
+async function stopVehicleStream() {
+      if (sseConnection) {
+          sseConnection.close();
+          sseConnection = null;
+      }
+      // Remove all vehicles
+      vehicleState.forEach((v) => v.remove());
+      vehicleState.clear();
+  }
+
+  async function startVehicleStream() {
+      if (sseConnection) return; // Already running
+
+      const url = `${API_BASE}/vehicles-sse`;
+      console.log(`Connecting to Unified Vehicle SSE:`, url);
+
+      const evtSource = new EventSource(url);
+      sseConnection = evtSource;
+      
+      evtSource.onopen = () => {
+          console.log(`Vehicle SSE Connection established.`);
+      };
+      
+      evtSource.onmessage = (e) => {
+          try {
+              const payload = JSON.parse(e.data);
+              if (payload.type === 'vehicles') {
+                  // Process in chunks to avoid blocking the main thread
+                  const dataArr = payload.data || [];
+                  const chunks = [];
+                  const size = 15;
+                  for (let i = 0; i < dataArr.length; i += size) {
+                      chunks.push(dataArr.slice(i, i + size));
+                  }
+
+                  const processNext = (idx) => {
+                      if (idx >= chunks.length) return;
+                      
+                      chunks[idx].forEach(vData => {
+                          // Optimization: If a vehicle is selected, skip 80% of updates for others
+                          if (selectedId && vData.id !== selectedId) {
+                              if (Math.random() > 0.3) return;
+                          }
+
+                          if (vehicleState.has(vData.id)) {
+                              const v = vehicleState.get(vData.id);
+                              if (!v.hasRouteGeometry()) {
+                                    const geom = resolveGeometry(vData);
+                                    if (geom) v.setRouteGeometry(geom);
+                              }
+                              v.update(vData);
+                          } else {
+                              const routeGeom = resolveGeometry(vData);
+                              const v = new Vehicle(vData, map, routeGeom);
+                              v.setOnSelect(handleSelect);
+                              vehicleState.set(vData.id, v);
+                          }
+                      });
+
+                      if (idx + 1 < chunks.length) {
+                          requestAnimationFrame(() => processNext(idx + 1));
+                      }
+                  };
+
+                  processNext(0);
+              }
+          } catch (err) {
+              console.error(`Error parsing Vehicle SSE`, err);
+          }
+      };
+
+      evtSource.onerror = (err) => {
+          console.error(`Vehicle SSE Error:`, err);
+      };
+  }
+
+  onMount(async () => {
+    if (!browser) return;
+
+    // 1. Start fetching network data IMMEDIATELY in parallel with map init
+    const networkPromise = fetch('/ret_network.json').then(r => {
+        if (!r.ok) throw new Error('Network data missing');
+        return r.json();
     });
 
-    map.on('load', () => {
-      connectSSE();
+    // 2. Initialize Map (Base tiles load)
+    map = await initMap(mapElement);
+    
+    // Add click-away listener to the map
+    map.on('click', (e) => {
+        // Only deselect if the click wasn't on a marker element
+        // (Since markers are DOM elements on top, we check e.originalEvent)
+        if (e.originalEvent && e.originalEvent.target && e.originalEvent.target.closest('.vehicle-marker')) {
+             return; 
+        }
+        if (selectedId) handleSelect(selectedId);
     });
+
+    // 3. Inject Dependencies for Vehicles
+    const maplibreModule = await import('maplibre-gl');
+    const maplibregl = maplibreModule.default || maplibreModule;
+    Vehicle.injectLibrary(maplibregl);
+
+    // 4. Wait for Network Data and Style
+    try {
+        const retData = await networkPromise;
+
+        // 5. Process Geometries for Snapping (Background CPU)
+        // Store geometries with their "Type" (Tram, Bus, Metro) to enable strict type-based snapping
+        const featureGroups = {}; // ref -> { coords: [], type: 'bus'|'tram'|'metro' }
+        
+        (retData.features || []).forEach(f => {
+            if (f.geometry && f.properties && f.properties.ref) {
+                const ref = f.properties.ref;
+                const layer = f.properties.layer || 'bus'; // Default to bus if unspecified
+                
+                if (!featureGroups[ref]) featureGroups[ref] = { coords: [], type: layer };
+                
+                if (f.geometry.type === 'LineString') {
+                    featureGroups[ref].coords.push(f.geometry.coordinates);
+                } else if (f.geometry.type === 'MultiLineString') {
+                    f.geometry.coordinates.forEach(coords => {
+                        featureGroups[ref].coords.push(coords);
+                    });
+                }
+            }
+        });
+        
+        // Convert to Turf Geometries with attached metadata about Type
+        for (const [ref, data] of Object.entries(featureGroups)) {
+            // routeGeometries[ref] is now an object { geom, type }
+            routeGeometries[ref] = {
+                geom: turf.multiLineString(data.coords),
+                type: data.type.toLowerCase() // 'bus', 'tram', 'metro'
+            };
+        }
+        console.log(`Loaded ${Object.keys(routeGeometries).length} route geometries for snapping.`);
+
+        // 6. Add Lines to Map
+        const addLayers = (data) => {
+             if (!map || !map.getStyle()) return;
+             if (map.getSource('ret-data')) return;
+
+             if (data) {
+                 map.addSource('ret-data', { type: 'geojson', data: data });
+               
+                 // 1. Bus Layer
+                 map.addLayer({
+                    id: 'ret-bus', type: 'line', source: 'ret-data',
+                    filter: ['==', 'layer', 'bus'],
+                    layout: { 'line-join': 'round', 'line-cap': 'round' },
+                    paint: {
+                        'line-color': '#D3D3D3', 
+                        'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 14, 1.5],
+                        'line-opacity': 0.6
+                    }
+                 });
+
+                 // 2. Tram Layer
+                 map.addLayer({
+                    id: 'ret-tram', type: 'line', source: 'ret-data',
+                    filter: ['==', 'layer', 'tram'],
+                    layout: { 'line-join': 'round', 'line-cap': 'round' },
+                    paint: {
+                        'line-color': '#D100AA',
+                        'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 14, 1.5],
+                        'line-opacity': 0.9
+                    }
+                 });
+
+                 // 3. Metro Layer
+                 map.addLayer({
+                    id: 'ret-metro', type: 'line', source: 'ret-data',
+                    filter: ['==', 'layer', 'metro'],
+                    layout: { 'line-join': 'round', 'line-cap': 'round' },
+                    paint: {
+                        'line-color': ['get', 'color'],
+                        'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.5, 14, 3],
+                        'line-opacity': 1.0
+                    }
+                 });
+
+                 // 4. Stops Layer
+                 map.addLayer({
+                    id: 'ret-stops', type: 'circle', source: 'ret-data',
+                    filter: ['has', 'isStop'],
+                    paint: {
+                        'circle-color': '#ffffff',
+                        'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 14, 4],
+                        'circle-stroke-width': 1.5,
+                        'circle-stroke-color': '#000000',
+                    }
+                 });
+             }
+             
+             // 7. Start Live Vehicle Stream
+             // Unified stream starts automatically
+             startVehicleStream();
+        };
+
+        if (map.loaded()) {
+            addLayers(retData);
+        } else {
+            map.once('load', () => addLayers(retData));
+        }
+
+    } catch (err) {
+        console.error("Failed to load network geometry", err);
+        // Fallback: Start vehicles anyway
+        startVehicleStream();
+    }
   });
 
   onDestroy(() => {
-    if (eventSource) eventSource.close();
-    if (map) map.remove();
+     if (sseConnection) sseConnection.close();
+     if (focusInterval) {
+         clearInterval(focusInterval);
+     }
+     vehicleState.forEach(v => v.remove());
+     vehicleState.clear();
   });
-
-  function connectSSE() {
-    // Connect to the optimized backend endpoint
-    // Fallback to localhost:8000 for local dev if needed, or relative path
-    const url = 'http://localhost:8000/vehicles-sse'; 
-    eventSource = new EventSource(url);
-
-    eventSource.onmessage = (event) => {
-      if (!event.data || event.data.trim() === '') return;
-      
-      try {
-        const payload = JSON.parse(event.data);
-        
-        // Handle "data" wrapper from new backend structure
-        let vehicles = [];
-        if (payload.type === 'vehicles' && payload.data) {
-          vehicles = payload.data;
-        } else if (payload.updates) {
-          vehicles = payload.updates; // Fallback for older backend version
-        } else if (Array.isArray(payload)) {
-          vehicles = payload;
-        }
-
-        if (vehicles.length > 0) {
-           // Batch visual updates to the next animation frame
-           requestAnimationFrame(() => updateVehicles(vehicles));
-        }
-
-      } catch (e) {
-        console.error('SSE Parse Error:', e);
-      }
-    };
-
-    eventSource.onerror = () => {
-      console.warn('SSE Disconnected. Retrying in 3s...');
-      eventSource.close();
-      setTimeout(connectSSE, 3000);
-    };
-  }
-
-  function updateVehicles(vehicles) {
-    vehicles.forEach(v => {
-      // Handle both old "id" and new keys if needed, preferring standard keys
-      const id = v.id || v.entity_id;
-      if (!id || !v.lat || !v.lon) return; // Skip invalid vehicles
-
-      if (vehicleMarkers.has(id)) {
-        // --- FAST PATH: UPDATE EXISTING ---
-        const markerData = vehicleMarkers.get(id);
-        const marker = markerData.markerInstance;
-        
-        // Move marker (MapLibre handles the interpolation internally if we use flyTo, 
-        // but setLngLat is instant. We use CSS transition on the element for smoothness)
-        marker.setLngLat([v.lon, v.lat]);
-        
-        // Update rotation (bearing) efficiently via direct DOM access
-        if (markerData.arrowElement && v.bearing !== undefined) {
-            markerData.arrowElement.style.transform = `rotate(${v.bearing}deg)`;
-        }
-
-        // Update popup text only if currently open
-        if (marker.getPopup().isOpen()) {
-            marker.getPopup().setHTML(generatePopupContent(v));
-        }
-        
-      } else {
-        // --- SLOW PATH: CREATE NEW ---
-        createMarker(v);
-      }
-    });
-
-    // Optional: Pruning logic could go here (remove markers not seen in X seconds)
-  }
-
-  function createMarker(v) {
-    const type = (v.type || 'bus').toLowerCase();
-    const routeId = v.route_id || v.line || '?';
-    const line = parseLine(routeId);
-    const color = COLORS[type] || COLORS.default;
-
-    // Create DOM element container
-    const el = document.createElement('div');
-    el.className = `v-marker v-${type}`;
-    el.style.setProperty('--v-color', color);
-    
-    // Inner HTML: Arrow for direction, Badge for line number
-    el.innerHTML = `
-      <div class="v-arrow"></div>
-      <div class="v-badge">${line}</div>
-    `;
-    
-    // Cache the arrow element for fast rotation updates later
-    const arrowEl = el.querySelector('.v-arrow');
-    arrowEl.style.transform = `rotate(${v.bearing || 0}deg)`;
-
-    // Create Popup
-    const popup = new maplibregl.Popup({ offset: 25, closeButton: false })
-        .setHTML(generatePopupContent(v));
-
-    // Create MapLibre Marker
-    const markerInstance = new maplibregl.Marker({ element: el })
-      .setLngLat([v.lon, v.lat])
-      .setPopup(popup)
-      .addTo(map);
-
-    vehicleMarkers.set(v.id || v.entity_id, {
-      markerInstance,
-      arrowElement: arrowEl,
-      type
-    });
-  }
-
-  function generatePopupContent(v) {
-    const routeId = v.route_id || v.line || '?';
-    const line = parseLine(routeId);
-    const typeUpper = (v.type || 'BUS').toUpperCase();
-    
-    // Handle headsign from new backend, fallback to destination
-    const headsign = v.headsign || v.destination || 'Unknown'; 
-    const speed = v.speed ? Math.round(v.speed) : 0;
-    
-    return `
-      <div class="p-container">
-        <div class="p-header" style="background: ${COLORS[v.type ? v.type.toLowerCase() : 'default'] || COLORS.default}">
-            <span class="p-line-badge">${line}</span> ${typeUpper}
-        </div>
-        <div class="p-body">
-            <div class="p-row"><span>To:</span> <strong>${headsign}</strong></div>
-            <div class="p-row"><span>Speed:</span> ${speed} km/h</div>
-            <div class="p-row"><span>Delay:</span> ${v.delay || 0}s</div>
-        </div>
-      </div>
-    `;
-  }
 </script>
 
-<div class="map-wrap" bind:this={mapContainer}></div>
+<div bind:this={mapElement} class="map-container"></div>
 
 <style>
-  .map-wrap {
+  .map-container {
     width: 100%;
-    height: 100vh;
-    background: #eef;
-  }
-
-  /* --- MARKER STYLES --- */
-  :global(.v-marker) {
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    /* Clean, logical z-index handling */
-    z-index: 10;
-    /* GPU Accelerated movement */
-    will-change: transform;
-    /* Smooth transition for position updates */
-    transition: transform 0.5s linear; 
-  }
-
-  /* Higher z-index for Metro/Tram so they aren't covered by buses */
-  :global(.v-marker.v-metro), :global(.v-marker.v-tram) {
-    z-index: 20;
-  }
-
-  /* The Directional Arrow */
-  :global(.v-arrow) {
-    width: 0; 
-    height: 0; 
-    border-left: 9px solid transparent;
-    border-right: 9px solid transparent;
-    border-bottom: 22px solid var(--v-color);
+    height: 100%;
     position: absolute;
-    top: 2px;
-    /* Pivot around the center of the visual marker */
-    transform-origin: 50% 60%; 
-    filter: drop-shadow(0px 2px 2px rgba(0,0,0,0.3));
-    transition: transform 0.3s ease-out; /* Smooth rotation */
+    top: 0;
+    left: 0;
   }
-
-  /* The Line Number Badge */
-  :global(.v-badge) {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    background: #fff;
-    color: #222;
-    font-size: 11px;
-    font-weight: 800;
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    border: 2px solid var(--v-color);
-    border-radius: 50%;
-    min-width: 20px;
-    height: 20px;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 3;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-  }
-
-  /* Metro Style: Square Badge */
-  :global(.v-metro .v-badge) {
-    border-radius: 3px; 
-    background: #fff;
-    color: var(--v-color);
-  }
-
-  /* Tram Style: Slightly larger */
-  :global(.v-tram .v-badge) {
-    border-width: 2px;
-  }
-
-  /* --- POPUP STYLES --- */
-  :global(.p-container) { 
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
-      min-width: 160px; 
-  }
-  :global(.p-header) {    
-      color: white; padding: 8px 12px; 
-      font-weight: bold; border-radius: 4px 4px 0 0; 
-      display: flex; align-items: center; gap: 8px;
-  }
-  :global(.p-line-badge) {
-    background: rgba(255,255,255,0.2);
-    padding: 1px 6px;
-    border-radius: 4px;
-    font-size: 0.9em;
-    min-width: 18px;
-    text-align: center;
-  }
-  :global(.p-body) { padding: 10px; line-height: 1.5em; font-size: 13px; color: #333; }
-  :global(.p-row) { display: flex; justify-content: space-between; border-bottom: 1px solid #eee; padding: 2px 0; }
-  :global(.p-row:last-child) { border-bottom: none; }
-  :global(.maplibregl-popup-content) { padding: 0 !important; border-radius: 6px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
-  :global(.maplibregl-popup-close-button) { color: white; font-size: 16px; top: 0; right: 4px; padding: 4px; }
-  :global(.maplibregl-popup-close-button:hover) { background: none; color: #eee; }
 </style>
