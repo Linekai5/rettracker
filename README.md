@@ -36,3 +36,10 @@ npm run build
 You can preview the production build with `npm run preview`.
 
 > To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+
+"Conduct a comprehensive review of all provided files. Analyze every line of code to understand the full logic and the overall intent of the application. Your specific goal is to diagnose why the backend is failing to connect or run successfully with the frontend.
+Please investigate potential issues including, but not limited to:
+Connectivity: Port mismatches, CORS configurations, or incorrect API base URLs.
+Logic: Discrepancies between frontend requests and backend endpoints.
+Environment: Missing dependencies or misconfigured environment variables.
+Important: Do not modify any code yet. Start by providing a detailed report of exactly what is wrong and a step-by-step plan of how you intend to fix it. Wait for my explicit approval before beginning any implementation."
