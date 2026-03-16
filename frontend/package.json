@@ -10,13 +10,16 @@
 		"prepare": "svelte-kit sync || echo ''"
 	},
 	"devDependencies": {
-		"@sveltejs/adapter-auto": "^7.0.0",
+		"@sveltejs/adapter-node": "^5.5.2",
 		"@sveltejs/kit": "^2.49.1",
 		"@sveltejs/vite-plugin-svelte": "^6.2.1",
 		"svelte": "^5.45.6",
 		"vite": "^7.2.6"
 	},
 	"dependencies": {
-		"maplibre-gl": "^2.4.0"
+		"@turf/turf": "^7.3.2",
+		"gsap": "^3.14.2",
+		"maplibre-gl": "^2.4.0",
+		"osmtogeojson": "^3.0.0-beta.5"
 	}
 }

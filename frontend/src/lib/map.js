@@ -15,9 +15,10 @@ export async function initMap(mapElement) {
   }
 
   // MapLibre expects [lng, lat]
-  const initialCenter = [4.42, 51.98];
-  const initialZoom = 11;
-
+  // Centered on Randstad (between R'dam and Den Haag)
+  const initialCenter = [4.38, 51.98];
+  const initialZoom = 10.5;
+  
   const style = {
     version: 8,
     sources: {
@@ -38,6 +39,7 @@ export async function initMap(mapElement) {
     style,
     center: initialCenter,
     zoom: initialZoom,
+    maxBounds: [[3.2, 50.7], [7.3, 53.6]], // Limit view to the Netherlands roughly
     interactive: true,
     attributionControl: false
   });

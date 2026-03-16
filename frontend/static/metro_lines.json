@@ -1,0 +1,343 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "line": "A",
+        "color": "green"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            4.556,
+            51.954
+          ],
+          [
+            4.545,
+            51.917
+          ],
+          [
+            4.482,
+            51.918
+          ],
+          [
+            4.394,
+            51.924
+          ],
+          [
+            4.313,
+            51.91
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "line": "B",
+        "color": "yellow"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            4.5878,
+            51.9824
+          ],
+          [
+            4.545,
+            51.917
+          ],
+          [
+            4.482,
+            51.918
+          ],
+          [
+            4.394,
+            51.924
+          ],
+          [
+            4.107,
+            51.9862
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "line": "C",
+        "color": "red"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            4.583,
+            51.935
+          ],
+          [
+            4.545,
+            51.917
+          ],
+          [
+            4.482,
+            51.918
+          ],
+          [
+            4.394,
+            51.924
+          ],
+          [
+            4.3283,
+            51.8427
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "line": "D",
+        "color": "cyan"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            4.4777,
+            51.9242
+          ],
+          [
+            4.482,
+            51.918
+          ],
+          [
+            4.488,
+            51.886
+          ],
+          [
+            4.3283,
+            51.8427
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "line": "E",
+        "color": "blue"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            4.3245,
+            52.0809
+          ],
+          [
+            4.4777,
+            51.9242
+          ],
+          [
+            4.482,
+            51.918
+          ],
+          [
+            4.488,
+            51.886
+          ],
+          [
+            4.4775,
+            51.8743
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Beurs",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.482,
+          51.918
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Rotterdam Centraal",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.4777,
+          51.9242
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Den Haag Centraal",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.3245,
+          52.0809
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Nesselande",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.5878,
+          51.9824
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Hoek van Holland Strand",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.107,
+          51.9862
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Slinge",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.4775,
+          51.8743
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "De Akkers",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.3283,
+          51.8427
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "De Terp",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.583,
+          51.935
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Binnenhof",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.556,
+          51.954
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Vlaardingen West",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.313,
+          51.91
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Schiedam Centrum",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.394,
+          51.924
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Capelsebrug",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.545,
+          51.917
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Zuidplein",
+        "type": "station"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          4.488,
+          51.886
+        ]
+      }
+    }
+  ]
+}
