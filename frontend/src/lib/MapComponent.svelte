@@ -12,7 +12,11 @@
   let selectedId = null;
   let focusInterval = null;
   
-  const stopState = new Map(); // Map<id, maplibregl.Marker>
+  const stopDataMap = new Map(); // Store latest stop data from SSE
+  let hoverPopup = null;
+  let searchQuery = "";
+  let searchedStopGeom = { type: "FeatureCollection", features: [] };
+
   const routeGeometries = {}; // route_id -> MultiLineString
   const resolvedCache = new Map(); // rid + hint -> geometry
   
@@ -147,14 +151,51 @@
       selectedId = id;
   }
 
-async function stopStopsStream() {
+  function handleSearch() {
+      if (!searchQuery.trim()) {
+          searchedStopGeom = { type: "FeatureCollection", features: [] };
+          updateSearchLayer();
+          return;
+      }
+      const query = searchQuery.toLowerCase();
+      
+      let found = null;
+      for (const sData of stopDataMap.values()) {
+          if (sData.name && sData.name.toLowerCase().includes(query)) {
+              found = sData;
+              break;
+          }
+      }
+
+      if (found) {
+          searchedStopGeom = {
+              type: "FeatureCollection",
+              features: [{
+                  type: "Feature",
+                  geometry: { type: "Point", coordinates: [found.lon, found.lat] },
+                  properties: {
+                      name: found.name || 'Unknown Stop',
+                      type: found.type || 'Unknown'
+                  }
+              }]
+          };
+      } else {
+          searchedStopGeom = { type: "FeatureCollection", features: [] };
+      }
+      updateSearchLayer();
+  }
+
+  function updateSearchLayer() {
+      if (!map || !map.getSource('search-stop-source')) return;
+      map.getSource('search-stop-source').setData(searchedStopGeom);
+  }
+
+  async function stopStopsStream() {
       if (sseConnection) {
           sseConnection.close();
           sseConnection = null;
       }
-      // Remove all stops
-      stopState.forEach((marker) => marker.remove());
-      stopState.clear();
+      stopDataMap.clear();
   }
 
   async function startStopsStream() {
@@ -173,56 +214,17 @@ async function stopStopsStream() {
       evtSource.onmessage = async (e) => {
           try {
               const payload = JSON.parse(e.data);
-              // The backend sends {"updates": [...]}
               const dataArr = payload.updates || [];
               if (!dataArr.length) return;
 
-              // Ensure maplibregl is loaded since we use it for markers directly now
-              const maplibreModule = await import('maplibre-gl');
-              const maplibregl = maplibreModule.default || maplibreModule;
-
               dataArr.forEach(sData => {
-                  if (stopState.has(sData.id)) {
-                      // Update existing stop coordinates/info if needed
-                      const marker = stopState.get(sData.id);
-                      marker.setLngLat([sData.lon, sData.lat]);
-                  } else {
-                      // Create new stop marker
-                      
-                      // Minimalist circle marker
-                      const el = document.createElement('div');
-                      el.className = 'stop-marker';
-                      el.style.width = '10px';
-                      el.style.height = '10px';
-                      el.style.backgroundColor = '#ffffff';
-                      el.style.border = '2px solid #000000';
-                      el.style.borderRadius = '50%';
-                      el.style.cursor = 'pointer';
-
-                      // Determine type string
-                      let typeStr = "Unknown";
-                      if (sData.type === "bus") typeStr = "Bus";
-                      else if (sData.type === "tram") typeStr = "Tram";
-                      else if (sData.type === "metro") typeStr = "Metro";
-                      else if (sData.type) typeStr = sData.type.charAt(0).toUpperCase() + sData.type.slice(1);
-
-                      // Simple Popup
-                      const popup = new maplibregl.Popup({ offset: 10, closeButton: false, closeOnClick: true })
-                          .setHTML(`
-                              <div style="font-family: Arial, sans-serif; padding: 2px;">
-                                  <div style="font-weight: bold; font-size: 14px; margin-bottom: 4px;">${sData.name || 'Unknown Stop'}</div>
-                                  <div style="font-size: 12px; color: #555;">${typeStr}</div>
-                              </div>
-                          `);
-
-                      const marker = new maplibregl.Marker({ element: el })
-                          .setLngLat([sData.lon, sData.lat])
-                          .setPopup(popup)
-                          .addTo(map);
-
-                      stopState.set(sData.id, marker);
-                  }
+                  stopDataMap.set(sData.id, sData);
               });
+              
+              // Re-run search in case the searched stop was just added/updated
+              if (searchQuery.trim()) {
+                  handleSearch();
+              }
           } catch (err) {
               console.error(`Error parsing Stops SSE`, err);
           }
@@ -236,6 +238,12 @@ async function stopStopsStream() {
   onMount(async () => {
     if (!browser) return;
 
+    const maplibreModule = await import('maplibre-gl');
+    const maplibregl = maplibreModule.default || maplibreModule;
+
+    // Initialize the shared hover popup
+    hoverPopup = new maplibregl.Popup({ offset: 10, closeButton: false, closeOnClick: false });
+
     // 1. Start fetching network data IMMEDIATELY in parallel with map init
     const networkPromise = fetch('/ret_network.json').then(r => {
         if (!r.ok) throw new Error('Network data missing');
@@ -247,9 +255,6 @@ async function stopStopsStream() {
     
     // Add click-away listener to the map
     map.on('click', (e) => {
-        if (e.originalEvent && e.originalEvent.target && e.originalEvent.target.closest('.stop-marker')) {
-             return; 
-        }
         if (selectedId) handleSelect(selectedId);
     });
 
@@ -298,7 +303,6 @@ async function stopStopsStream() {
                
                  // 1. Bus Layer
                  map.addLayer({
-                    id: 'ret-bus', type: 'line', source: 'ret-data',
                     filter: ['==', 'layer', 'bus'],
                     layout: { 'line-join': 'round', 'line-cap': 'round' },
                     paint: {
@@ -310,7 +314,6 @@ async function stopStopsStream() {
 
                  // 2. Tram Layer
                  map.addLayer({
-                    id: 'ret-tram', type: 'line', source: 'ret-data',
                     filter: ['==', 'layer', 'tram'],
                     layout: { 'line-join': 'round', 'line-cap': 'round' },
                     paint: {
@@ -322,7 +325,6 @@ async function stopStopsStream() {
 
                  // 3. Metro Layer
                  map.addLayer({
-                    id: 'ret-metro', type: 'line', source: 'ret-data',
                     filter: ['==', 'layer', 'metro'],
                     layout: { 'line-join': 'round', 'line-cap': 'round' },
                     paint: {
@@ -332,16 +334,45 @@ async function stopStopsStream() {
                     }
                  });
 
-                 // 4. Stops Layer
+                 // Initialize Search Stop GeoJSON Source & WebGL Layer to prevent zoom jitter
+                 map.addSource('search-stop-source', { type: 'geojson', data: searchedStopGeom });
+                 
                  map.addLayer({
-                    id: 'ret-stops', type: 'circle', source: 'ret-data',
-                    filter: ['has', 'isStop'],
+                    id: 'search-stop-layer',
+                    type: 'circle',
+                    source: 'search-stop-source',
                     paint: {
                         'circle-color': '#ffffff',
-                        'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 14, 4],
-                        'circle-stroke-width': 1.5,
-                        'circle-stroke-color': '#000000',
+                        'circle-radius': 6,
+                        'circle-stroke-width': 2,
+                        'circle-stroke-color': '#000000'
                     }
+                 });
+
+                 // Render Tooltip exclusively on hover of the search result
+                 map.on('mouseenter', 'search-stop-layer', (e) => {
+                     map.getCanvas().style.cursor = 'pointer';
+                     const props = e.features[0].properties;
+
+                     let typeStr = "Unknown";
+                     if (props.type === "bus") typeStr = "Bus";
+                     else if (props.type === "tram") typeStr = "Tram";
+                     else if (props.type === "metro") typeStr = "Metro";
+                     else if (props.type) typeStr = props.type.charAt(0).toUpperCase() + props.type.slice(1);
+
+                     const html = `
+                         <div style="font-family: Arial, sans-serif; padding: 2px;">
+                             <div style="font-weight: bold; font-size: 14px; margin-bottom: 4px;">${props.name}</div>
+                             <div style="font-size: 12px; color: #555;">${typeStr}</div>
+                         </div>
+                     `;
+                     
+                     hoverPopup.setLngLat(e.features[0].geometry.coordinates).setHTML(html).addTo(map);
+                 });
+
+                 map.on('mouseleave', 'search-stop-layer', () => {
+                     map.getCanvas().style.cursor = '';
+                     hoverPopup.remove();
                  });
              }
              
@@ -364,27 +395,46 @@ async function stopStopsStream() {
 
   onDestroy(() => {
      if (sseConnection) sseConnection.close();
-     stopState.forEach(marker => marker.remove());
-     stopState.clear();
+     if (hoverPopup) hoverPopup.remove();
+     stopDataMap.clear();
   });
 </script>
 
-<div bind:this={mapElement} class="map-container"></div>
+<div class="search-container">
+    <input type="text" placeholder="Search stop..." bind:value={searchQuery} on:input={handleSearch} class="search-input" />
+</div>
+
+<div bind:this={mapElement} class="map-wrapper"></div>
 
 <style>
-  .map-container {
+  .map-wrapper {
     width: 100%;
     height: 100%;
     position: absolute;
     top: 0;
     left: 0;
+    z-index: 1; /* Below the search container */
   }
-  
-  :global(.stop-marker) {
-      transition: transform 0.2s ease;
+
+  .search-container {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    z-index: 10;
   }
-  
-  :global(.stop-marker:hover) {
-      transform: scale(1.5);
+
+  .search-input {
+    padding: 10px 15px;
+    font-size: 16px;
+    border: 2px solid #ccc;
+    border-radius: 8px;
+    width: 250px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .search-input:focus {
+    border-color: #00163d;
   }
 </style>
