@@ -371,7 +371,7 @@
                     type: 'circle',
                     source: 'search-stop-source',
                     paint: {
-                        'circle-color': '#6E6E6E',
+                        'circle-color': '#FFD500',
                         'circle-radius': 5,
                         'circle-stroke-width': 1.5,
                         'circle-stroke-color': '#000000'
