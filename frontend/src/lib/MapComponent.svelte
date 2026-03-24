@@ -2,7 +2,6 @@
   import { onMount, onDestroy } from 'svelte';
   import { initMap } from './map.js';
   import { browser, dev } from '$app/environment';
-  import { Vehicle } from './Vehicle.js';
   // Removed direct import to avoid bundling 2.4MB JSON
   // import retData from '$lib/assets/ret_network.json';
   import * as turf from '@turf/turf';
@@ -13,7 +12,7 @@
   let selectedId = null;
   let focusInterval = null;
   
-  const vehicleState = new Map(); // Map<id, Vehicle>
+  const stopState = new Map(); // Map<id, maplibregl.Marker>
   const routeGeometries = {}; // route_id -> MultiLineString
   const resolvedCache = new Map(); // rid + hint -> geometry
   
@@ -142,112 +141,95 @@
 
   function handleSelect(id) {
       if (selectedId === id) {
-          // Deselect current
-          if (vehicleState.has(selectedId)) {
-              vehicleState.get(selectedId).setSelected(false);
-          }
           selectedId = null;
-          if (focusInterval) {
-             clearInterval(focusInterval);
-             focusInterval = null;
-          }
           return;
       }
-      
-      // Update visual for old selection
-      if (selectedId && vehicleState.has(selectedId)) {
-          vehicleState.get(selectedId).setSelected(false);
-      }
-
       selectedId = id;
-      
-      // Update visual for new selection
-      if (vehicleState.has(id)) {
-          vehicleState.get(id).setSelected(true);
-      }
-      
-      // Immediate fetch
-      fetchVehicleUpdate(id);
-      
-      // High frequency polling for the focused vehicle (1s)
-      if (focusInterval) clearInterval(focusInterval);
-      focusInterval = setInterval(() => fetchVehicleUpdate(id), 1000); 
   }
 
-
-async function stopVehicleStream() {
+async function stopStopsStream() {
       if (sseConnection) {
           sseConnection.close();
           sseConnection = null;
       }
-      // Remove all vehicles
-      vehicleState.forEach((v) => v.remove());
-      vehicleState.clear();
+      // Remove all stops
+      stopState.forEach((marker) => marker.remove());
+      stopState.clear();
   }
 
-  async function startVehicleStream() {
+  async function startStopsStream() {
       if (sseConnection) return; // Already running
 
-      const url = `${API_BASE}/vehicles-sse`;
-      console.log(`Connecting to Unified Vehicle SSE:`, url);
+      const url = `${API_BASE}/stops-sse`;
+      console.log(`Connecting to Stops SSE:`, url);
 
       const evtSource = new EventSource(url);
       sseConnection = evtSource;
       
       evtSource.onopen = () => {
-          console.log(`Vehicle SSE Connection established.`);
+          console.log(`Stops SSE Connection established.`);
       };
       
-      evtSource.onmessage = (e) => {
+      evtSource.onmessage = async (e) => {
           try {
               const payload = JSON.parse(e.data);
-              if (payload.type === 'vehicles') {
-                  // Process in chunks to avoid blocking the main thread
-                  const dataArr = payload.data || [];
-                  const chunks = [];
-                  const size = 15;
-                  for (let i = 0; i < dataArr.length; i += size) {
-                      chunks.push(dataArr.slice(i, i + size));
-                  }
+              // The backend sends {"updates": [...]}
+              const dataArr = payload.updates || [];
+              if (!dataArr.length) return;
 
-                  const processNext = (idx) => {
-                      if (idx >= chunks.length) return;
+              // Ensure maplibregl is loaded since we use it for markers directly now
+              const maplibreModule = await import('maplibre-gl');
+              const maplibregl = maplibreModule.default || maplibreModule;
+
+              dataArr.forEach(sData => {
+                  if (stopState.has(sData.id)) {
+                      // Update existing stop coordinates/info if needed
+                      const marker = stopState.get(sData.id);
+                      marker.setLngLat([sData.lon, sData.lat]);
+                  } else {
+                      // Create new stop marker
                       
-                      chunks[idx].forEach(vData => {
-                          // Optimization: If a vehicle is selected, skip 80% of updates for others
-                          if (selectedId && vData.id !== selectedId) {
-                              if (Math.random() > 0.3) return;
-                          }
+                      // Minimalist circle marker
+                      const el = document.createElement('div');
+                      el.className = 'stop-marker';
+                      el.style.width = '10px';
+                      el.style.height = '10px';
+                      el.style.backgroundColor = '#ffffff';
+                      el.style.border = '2px solid #000000';
+                      el.style.borderRadius = '50%';
+                      el.style.cursor = 'pointer';
 
-                          if (vehicleState.has(vData.id)) {
-                              const v = vehicleState.get(vData.id);
-                              if (!v.hasRouteGeometry()) {
-                                    const geom = resolveGeometry(vData);
-                                    if (geom) v.setRouteGeometry(geom);
-                              }
-                              v.update(vData);
-                          } else {
-                              const routeGeom = resolveGeometry(vData);
-                              const v = new Vehicle(vData, map, routeGeom);
-                              v.setOnSelect(handleSelect);
-                              vehicleState.set(vData.id, v);
-                          }
-                      });
+                      // Determine type string
+                      let typeStr = "Unknown";
+                      if (sData.type === "bus") typeStr = "Bus";
+                      else if (sData.type === "tram") typeStr = "Tram";
+                      else if (sData.type === "metro") typeStr = "Metro";
+                      else if (sData.type) typeStr = sData.type.charAt(0).toUpperCase() + sData.type.slice(1);
 
-                      if (idx + 1 < chunks.length) {
-                          requestAnimationFrame(() => processNext(idx + 1));
-                      }
-                  };
+                      // Simple Popup
+                      const popup = new maplibregl.Popup({ offset: 10, closeButton: false, closeOnClick: true })
+                          .setHTML(`
+                              <div style="font-family: Arial, sans-serif; padding: 2px;">
+                                  <div style="font-weight: bold; font-size: 14px; margin-bottom: 4px;">${sData.name || 'Unknown Stop'}</div>
+                                  <div style="font-size: 12px; color: #555;">${typeStr}</div>
+                              </div>
+                          `);
 
-                  processNext(0);
-              }
+                      const marker = new maplibregl.Marker({ element: el })
+                          .setLngLat([sData.lon, sData.lat])
+                          .setPopup(popup)
+                          .addTo(map);
+
+                      stopState.set(sData.id, marker);
+                  }
+              });
           } catch (err) {
-              console.error(`Error parsing Vehicle SSE`, err);
+              console.error(`Error parsing Stops SSE`, err);
           }
       };
 
       evtSource.onerror = (err) => {
-          console.error(`Vehicle SSE Error:`, err);
+          console.error(`Stops SSE Error:`, err);
       };
   }
 
@@ -265,18 +247,11 @@ async function stopVehicleStream() {
     
     // Add click-away listener to the map
     map.on('click', (e) => {
-        // Only deselect if the click wasn't on a marker element
-        // (Since markers are DOM elements on top, we check e.originalEvent)
-        if (e.originalEvent && e.originalEvent.target && e.originalEvent.target.closest('.vehicle-marker')) {
+        if (e.originalEvent && e.originalEvent.target && e.originalEvent.target.closest('.stop-marker')) {
              return; 
         }
         if (selectedId) handleSelect(selectedId);
     });
-
-    // 3. Inject Dependencies for Vehicles
-    const maplibreModule = await import('maplibre-gl');
-    const maplibregl = maplibreModule.default || maplibreModule;
-    Vehicle.injectLibrary(maplibregl);
 
     // 4. Wait for Network Data and Style
     try {
@@ -370,9 +345,8 @@ async function stopVehicleStream() {
                  });
              }
              
-             // 7. Start Live Vehicle Stream
-             // Unified stream starts automatically
-             startVehicleStream();
+             // 7. Start Live Stops Stream
+             startStopsStream();
         };
 
         if (map.loaded()) {
@@ -383,18 +357,15 @@ async function stopVehicleStream() {
 
     } catch (err) {
         console.error("Failed to load network geometry", err);
-        // Fallback: Start vehicles anyway
-        startVehicleStream();
+        // Fallback: Start stops anyway
+        startStopsStream();
     }
   });
 
   onDestroy(() => {
      if (sseConnection) sseConnection.close();
-     if (focusInterval) {
-         clearInterval(focusInterval);
-     }
-     vehicleState.forEach(v => v.remove());
-     vehicleState.clear();
+     stopState.forEach(marker => marker.remove());
+     stopState.clear();
   });
 </script>
 
@@ -407,5 +378,13 @@ async function stopVehicleStream() {
     position: absolute;
     top: 0;
     left: 0;
+  }
+  
+  :global(.stop-marker) {
+      transition: transform 0.2s ease;
+  }
+  
+  :global(.stop-marker:hover) {
+      transform: scale(1.5);
   }
 </style>
