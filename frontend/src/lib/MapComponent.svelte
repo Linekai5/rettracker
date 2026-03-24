@@ -159,29 +159,49 @@
       }
       const query = searchQuery.toLowerCase();
       
-      let found = null;
+      const matchedGroups = new Map();
+      
       for (const sData of stopDataMap.values()) {
           if (sData.name && sData.name.toLowerCase().includes(query)) {
-              found = sData;
-              break;
+              const name = sData.name;
+              if (!matchedGroups.has(name)) {
+                  matchedGroups.set(name, {
+                      name: name,
+                      types: new Set(),
+                      latSum: 0,
+                      lonSum: 0,
+                      count: 0
+                  });
+              }
+              const group = matchedGroups.get(name);
+              if (sData.type) group.types.add(sData.type);
+              group.latSum += sData.lat;
+              group.lonSum += sData.lon;
+              group.count++;
           }
       }
 
-      if (found) {
-          searchedStopGeom = {
-              type: "FeatureCollection",
-              features: [{
-                  type: "Feature",
-                  geometry: { type: "Point", coordinates: [found.lon, found.lat] },
-                  properties: {
-                      name: found.name || 'Unknown Stop',
-                      type: found.type || 'Unknown'
-                  }
-              }]
-          };
-      } else {
-          searchedStopGeom = { type: "FeatureCollection", features: [] };
+      const features = [];
+      for (const group of matchedGroups.values()) {
+          const avgLat = group.latSum / group.count;
+          const avgLon = group.lonSum / group.count;
+          const typesArr = Array.from(group.types).map(t => t.charAt(0).toUpperCase() + t.slice(1));
+          
+          features.push({
+              type: "Feature",
+              geometry: { type: "Point", coordinates: [avgLon, avgLat] },
+              properties: {
+                  name: group.name || 'Unknown Stop',
+                  type: typesArr.join(', ') || 'Unknown'
+              }
+          });
       }
+
+      searchedStopGeom = {
+          type: "FeatureCollection",
+          features: features
+      };
+      
       updateSearchLayer();
   }
 
@@ -363,11 +383,7 @@
                      map.getCanvas().style.cursor = 'pointer';
                      const props = e.features[0].properties;
 
-                     let typeStr = "Unknown";
-                     if (props.type === "bus") typeStr = "Bus";
-                     else if (props.type === "tram") typeStr = "Tram";
-                     else if (props.type === "metro") typeStr = "Metro";
-                     else if (props.type) typeStr = props.type.charAt(0).toUpperCase() + props.type.slice(1);
+                     const typeStr = props.type || "Unknown";
 
                      const html = `
                          <div style="font-family: Arial, sans-serif; padding: 2px;">
