@@ -16,6 +16,8 @@
   let hoverPopup = null;
   let searchQuery = "";
   let searchedStopGeom = { type: "FeatureCollection", features: [] };
+  let selectedStop = null;
+  let selectedModeFilter = 'all';
 
   const routeGeometries = {}; // route_id -> MultiLineString
   const resolvedCache = new Map(); // rid + hint -> geometry
@@ -186,6 +188,7 @@
       }
 
       const features = [];
+      let featureId = 1;
       for (const group of matchedGroups.values()) {
           const avgLat = group.latSum / group.count;
           const avgLon = group.lonSum / group.count;
@@ -193,14 +196,15 @@
           
           const sortedArrivals = group.arrivals
               .filter(a => a.ExpectedDepartureTime)
-              .sort((a, b) => new Date(a.ExpectedDepartureTime) - new Date(b.ExpectedDepartureTime))
-              .slice(0, 5);
+              .sort((a, b) => new Date(a.ExpectedDepartureTime) - new Date(b.ExpectedDepartureTime));
           
           features.push({
               type: "Feature",
+              id: featureId++,
               geometry: { type: "Point", coordinates: [avgLon, avgLat] },
               properties: {
                   name: group.name || 'Unknown Stop',
+                  typeList: JSON.stringify(Array.from(group.types)),
                   type: typesArr.join(', ') || 'Unknown',
                   arrivals: JSON.stringify(sortedArrivals)
               }
@@ -213,11 +217,27 @@
       };
       
       updateSearchLayer();
+      
+      // Close panel if search changes and removes current stop
+      if (!searchQuery.trim() || features.length === 0) {
+          closePanel();
+      }
   }
 
   function updateSearchLayer() {
       if (!map || !map.getSource('search-stop-source')) return;
       map.getSource('search-stop-source').setData(searchedStopGeom);
+  }
+
+  function closePanel() {
+      selectedStop = null;
+      if (map) {
+          map.flyTo({
+              center: [4.4777, 51.9244],
+              zoom: 12,
+              duration: 800
+          });
+      }
   }
 
   async function stopStopsStream() {
@@ -286,6 +306,12 @@
     // Add click-away listener to the map
     map.on('click', (e) => {
         if (selectedId) handleSelect(selectedId);
+        
+        // If they click on the map but not on the point, close the panel
+        const features = map.queryRenderedFeatures(e.point, { layers: ['search-stop-layer'] });
+        if (!features.length && selectedStop) {
+            closePanel();
+        }
     });
 
     // 4. Wait for Network Data and Style
@@ -382,117 +408,18 @@
                     source: 'search-stop-source',
                     paint: {
                         'circle-color': '#FFD500',
-                        'circle-radius': 5,
+                        'circle-radius': ['case', ['boolean', ['feature-state', 'hover'], false], 8, 5],
                         'circle-stroke-width': 1.5,
                         'circle-stroke-color': '#000000'
                     }
                  });
+
+                 let hoveredStateId = null;
 
                  // Render Tooltip exclusively on hover of the search result
                  map.on('mouseenter', 'search-stop-layer', (e) => {
                      map.getCanvas().style.cursor = 'pointer';
                      const props = e.features[0].properties;
 
-                     const typeStr = props.type || "Unknown";
-                     let arrivalsHtml = "";
-                     try {
-                         const arrivals = JSON.parse(props.arrivals || "[]");
-                         if (arrivals.length > 0) {
-                             arrivalsHtml = `<div style="margin-top: 6px; border-top: 1px solid #ddd; padding-top: 6px;">`;
-                             arrivalsHtml += `<div style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: #333;">Next Arrivals:</div>`;
-                             for (const arr of arrivals) {
-                                 const time = new Date(arr.ExpectedDepartureTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-                                 const dest = arr.DestinationName50 || 'Unknown';
-                                 const line = arr.LinePublicNumber || '?';
-                                 arrivalsHtml += `
-                                 <div style="font-size: 11px; display: flex; justify-content: space-between; margin-bottom: 2px;">
-                                     <span style="font-weight:bold; margin-right: 6px; min-width: 20px;">${line}</span>
-                                     <span style="flex-grow: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; margin-right: 8px;" title="${dest}">${dest}</span>
-                                     <span>${time}</span>
-                                 </div>`;
-                             }
-                             arrivalsHtml += `</div>`;
-                         }
-                     } catch(err) {
-                         console.error("Error parsing arrivals for popup", err);
-                     }
-
-                     const html = `
-                         <div style="font-family: Arial, sans-serif; padding: 4px; min-width: 180px;">
-                             <div style="font-weight: bold; font-size: 14px; margin-bottom: 2px;">${props.name}</div>
-                             <div style="font-size: 12px; color: #666;">${typeStr}</div>
-                             ${arrivalsHtml}
-                         </div>
-                     `;
-                     
-                     hoverPopup.setLngLat(e.features[0].geometry.coordinates).setHTML(html).addTo(map);
-                 });
-
-                 map.on('mouseleave', 'search-stop-layer', () => {
-                     map.getCanvas().style.cursor = '';
-                     hoverPopup.remove();
-                 });
-             }
-             
-             // 7. Start Live Stops Stream
-             startStopsStream();
-        };
-
-        if (map.loaded()) {
-            addLayers(retData);
-        } else {
-            map.once('load', () => addLayers(retData));
-        }
-
-    } catch (err) {
-        console.error("Failed to load network geometry", err);
-        // Fallback: Start stops anyway
-        startStopsStream();
-    }
-  });
-
-  onDestroy(() => {
-     if (sseConnection) sseConnection.close();
-     if (hoverPopup) hoverPopup.remove();
-     stopDataMap.clear();
-  });
-</script>
-
-<div class="search-container">
-    <input type="text" placeholder="Search stop..." bind:value={searchQuery} on:input={handleSearch} class="search-input" />
-</div>
-
-<div bind:this={mapElement} class="map-wrapper"></div>
-
-<style>
-  .map-wrapper {
-    width: 100%;
-    height: 100%;
-    position: absolute;
-    top: 0;
-    left: 0;
-    z-index: 1; /* Below the search container */
-  }
-
-  .search-container {
-    position: absolute;
-    top: 80px; /* 60px header + 20px padding */
-    right: 20px;
-    z-index: 10;
-  }
-
-  .search-input {
-    padding: 10px 15px;
-    font-size: 16px;
-    border: 2px solid #ccc;
-    border-radius: 8px;
-    width: 250px;
-    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    outline: none;
-    transition: border-color 0.2s;
-  }
-
-  .search-input:focus {
-    border-color: #00163d;
-  }
-</style>
+                     if (e.features.length > 0) {
+                         if
