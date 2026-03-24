@@ -422,4 +422,255 @@
                      const props = e.features[0].properties;
 
                      if (e.features.length > 0) {
-                         if
+                         if (hoveredStateId !== null) {
+                             map.setFeatureState(
+                                 { source: 'search-stop-source', id: hoveredStateId },
+                                 { hover: false }
+                             );
+                         }
+                         hoveredStateId = e.features[0].id;
+                         map.setFeatureState(
+                             { source: 'search-stop-source', id: hoveredStateId },
+                             { hover: true }
+                         );
+                     }
+
+                     const html = `
+                         <div style="font-family: Arial, sans-serif; padding: 4px; min-width: 100px; text-align: center;">
+                             <div style="font-weight: bold; font-size: 14px;">${props.name}</div>
+                         </div>
+                     `;
+                     
+                     hoverPopup.setLngLat(e.features[0].geometry.coordinates).setHTML(html).addTo(map);
+                 });
+
+                 map.on('mouseleave', 'search-stop-layer', () => {
+                     map.getCanvas().style.cursor = '';
+                     hoverPopup.remove();
+                     
+                     if (hoveredStateId !== null) {
+                         map.setFeatureState(
+                             { source: 'search-stop-source', id: hoveredStateId },
+                             { hover: false }
+                         );
+                     }
+                     hoveredStateId = null;
+                 });
+                 
+                 map.on('click', 'search-stop-layer', (e) => {
+                     if (!e.features.length) return;
+                     const feature = e.features[0];
+                     const coords = feature.geometry.coordinates;
+                     
+                     const props = feature.properties;
+                     let arrivals = [];
+                     let typeList = [];
+                     try {
+                         arrivals = JSON.parse(props.arrivals || "[]");
+                         typeList = JSON.parse(props.typeList || "[]");
+                     } catch(err) {}
+                     
+                     selectedStop = {
+                         name: props.name,
+                         types: typeList.map(t => t.charAt(0).toUpperCase() + t.slice(1)),
+                         arrivals: arrivals
+                     };
+                     selectedModeFilter = 'all';
+                     
+                     // Fly to stop
+                     map.flyTo({
+                         center: coords,
+                         zoom: 16,
+                         duration: 800
+                     });
+                     
+                     hoverPopup.remove();
+                 });
+             }
+             
+             // 7. Start Live Stops Stream
+             startStopsStream();
+        };
+
+        if (map.loaded()) {
+            addLayers(retData);
+        } else {
+            map.once('load', () => addLayers(retData));
+        }
+
+    } catch (err) {
+        console.error("Failed to load network geometry", err);
+        // Fallback: Start stops anyway
+        startStopsStream();
+    }
+  });
+
+  onDestroy(() => {
+     if (sseConnection) sseConnection.close();
+     if (hoverPopup) hoverPopup.remove();
+     stopDataMap.clear();
+  });
+</script>
+
+<div class="search-container">
+    <input type="text" placeholder="Search stop..." bind:value={searchQuery} on:input={handleSearch} class="search-input" />
+</div>
+
+{#if selectedStop}
+<div class="side-panel">
+    <div class="panel-header">
+        <h2>{selectedStop.name}</h2>
+        <button on:click={closePanel} class="close-btn">X</button>
+    </div>
+    
+    {#if selectedStop.types.length > 1}
+    <div class="mode-filters">
+        <button class:active={selectedModeFilter === 'all'} on:click={() => selectedModeFilter = 'all'}>All</button>
+        {#each selectedStop.types as mode}
+            <button class:active={selectedModeFilter === mode.toLowerCase()} on:click={() => selectedModeFilter = mode.toLowerCase()}>{mode}</button>
+        {/each}
+    </div>
+    {/if}
+    
+    <div class="arrivals-list">
+        {#each selectedStop.arrivals.filter(a => selectedModeFilter === 'all' || (a.TransportType || '').toLowerCase() === selectedModeFilter || selectedStop.types.length === 1) as arr}
+            <div class="arrival-item">
+                <div class="arrival-line">{arr.LinePublicNumber || '?'}</div>
+                <div class="arrival-dest">{arr.DestinationName50 || 'Unknown'}</div>
+                <div class="arrival-time">{new Date(arr.ExpectedDepartureTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+            </div>
+        {/each}
+        {#if selectedStop.arrivals.filter(a => selectedModeFilter === 'all' || (a.TransportType || '').toLowerCase() === selectedModeFilter || selectedStop.types.length === 1).length === 0}
+            <div style="padding: 10px; color: #666;">No upcoming arrivals.</div>
+        {/if}
+    </div>
+</div>
+{/if}
+
+<div bind:this={mapElement} class="map-wrapper"></div>
+
+<style>
+  .map-wrapper {
+    width: 100%;
+    height: 100%;
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 1; /* Below the search container */
+  }
+
+  .search-container {
+    position: absolute;
+    top: 80px; /* 60px header + 20px padding */
+    right: 20px;
+    z-index: 10;
+  }
+
+  .search-input {
+    padding: 10px 15px;
+    font-size: 16px;
+    border: 2px solid #ccc;
+    border-radius: 8px;
+    width: 250px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .search-input:focus {
+    border-color: #00163d;
+  }
+  
+  .side-panel {
+    position: absolute;
+    top: 80px;
+    right: 20px;
+    width: 320px;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    z-index: 15;
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 100px);
+    overflow: hidden;
+  }
+  
+  .panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px;
+    border-bottom: 1px solid #eee;
+  }
+  
+  .panel-header h2 {
+    margin: 0;
+    font-size: 18px;
+  }
+  
+  .close-btn {
+    background: none;
+    border: none;
+    font-size: 16px;
+    cursor: pointer;
+    font-weight: bold;
+    color: #666;
+  }
+  
+  .mode-filters {
+    display: flex;
+    gap: 8px;
+    padding: 10px 15px;
+    background: #f9f9f9;
+    border-bottom: 1px solid #eee;
+    flex-wrap: wrap;
+  }
+  
+  .mode-filters button {
+    border: 1px solid #ddd;
+    background: white;
+    border-radius: 12px;
+    padding: 4px 12px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  
+  .mode-filters button.active {
+    background: #00163d;
+    color: white;
+    border-color: #00163d;
+  }
+  
+  .arrivals-list {
+    flex-grow: 1;
+    overflow-y: auto;
+    padding: 10px 15px;
+  }
+  
+  .arrival-item {
+    display: flex;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid #f0f0f0;
+  }
+  
+  .arrival-line {
+    font-weight: bold;
+    min-width: 30px;
+  }
+  
+  .arrival-dest {
+    flex-grow: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-right: 10px;
+  }
+  
+  .arrival-time {
+    font-family: monospace;
+    font-size: 14px;
+    color: #333;
+  }
+</style>
