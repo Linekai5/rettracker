@@ -371,9 +371,9 @@
                     type: 'circle',
                     source: 'search-stop-source',
                     paint: {
-                        'circle-color': '#ffffff',
-                        'circle-radius': 6,
-                        'circle-stroke-width': 2,
+                        'circle-color': '#6E6E6E',
+                        'circle-radius': 5,
+                        'circle-stroke-width': 1.5,
                         'circle-stroke-color': '#000000'
                     }
                  });
