@@ -181,8 +181,8 @@
               group.latSum += sData.lat;
               group.lonSum += sData.lon;
               group.count++;
-              if (sData.arrivals && Array.isArray(sData.arrivals)) {
-                  group.arrivals.push(...sData.arrivals);
+              if (sData.passages && Array.isArray(sData.passages)) {
+                  group.arrivals.push(...sData.passages);
               }
           }
       }
@@ -195,8 +195,8 @@
           const typesArr = Array.from(group.types).map(t => t.charAt(0).toUpperCase() + t.slice(1));
           
           const sortedArrivals = group.arrivals
-              .filter(a => a.ExpectedDepartureTime)
-              .sort((a, b) => new Date(a.ExpectedDepartureTime) - new Date(b.ExpectedDepartureTime));
+              .filter(a => a.expected_arrival)
+              .sort((a, b) => new Date(a.expected_arrival) - new Date(b.expected_arrival));
           
           features.push({
               type: "Feature",
@@ -533,14 +533,14 @@
     {/if}
     
     <div class="arrivals-list">
-        {#each selectedStop.arrivals.filter(a => selectedModeFilter === 'all' || (a.TransportType || '').toLowerCase() === selectedModeFilter || selectedStop.types.length === 1) as arr}
+        {#each selectedStop.arrivals.filter(a => selectedModeFilter === 'all' || (a.type || '').toLowerCase() === selectedModeFilter || selectedStop.types.length === 1) as arr}
             <div class="arrival-item">
-                <div class="arrival-line">{arr.LinePublicNumber || '?'}</div>
-                <div class="arrival-dest">{arr.DestinationName50 || 'Unknown'}</div>
-                <div class="arrival-time">{new Date(arr.ExpectedDepartureTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+                <div class="arrival-line">{arr.line || '?'}</div>
+                <div class="arrival-dest">{arr.destination || 'Unknown'}</div>
+                <div class="arrival-time">{new Date(arr.expected_arrival).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
             </div>
         {/each}
-        {#if selectedStop.arrivals.filter(a => selectedModeFilter === 'all' || (a.TransportType || '').toLowerCase() === selectedModeFilter || selectedStop.types.length === 1).length === 0}
+        {#if selectedStop.arrivals.filter(a => selectedModeFilter === 'all' || (a.type || '').toLowerCase() === selectedModeFilter || selectedStop.types.length === 1).length === 0}
             <div style="padding: 10px; color: #666;">No upcoming arrivals.</div>
         {/if}
     </div>
