@@ -170,7 +170,8 @@
                       types: new Set(),
                       latSum: 0,
                       lonSum: 0,
-                      count: 0
+                      count: 0,
+                      arrivals: []
                   });
               }
               const group = matchedGroups.get(name);
@@ -178,6 +179,9 @@
               group.latSum += sData.lat;
               group.lonSum += sData.lon;
               group.count++;
+              if (sData.arrivals && Array.isArray(sData.arrivals)) {
+                  group.arrivals.push(...sData.arrivals);
+              }
           }
       }
 
@@ -187,12 +191,18 @@
           const avgLon = group.lonSum / group.count;
           const typesArr = Array.from(group.types).map(t => t.charAt(0).toUpperCase() + t.slice(1));
           
+          const sortedArrivals = group.arrivals
+              .filter(a => a.ExpectedDepartureTime)
+              .sort((a, b) => new Date(a.ExpectedDepartureTime) - new Date(b.ExpectedDepartureTime))
+              .slice(0, 5);
+          
           features.push({
               type: "Feature",
               geometry: { type: "Point", coordinates: [avgLon, avgLat] },
               properties: {
                   name: group.name || 'Unknown Stop',
-                  type: typesArr.join(', ') || 'Unknown'
+                  type: typesArr.join(', ') || 'Unknown',
+                  arrivals: JSON.stringify(sortedArrivals)
               }
           });
       }
@@ -384,11 +394,34 @@
                      const props = e.features[0].properties;
 
                      const typeStr = props.type || "Unknown";
+                     let arrivalsHtml = "";
+                     try {
+                         const arrivals = JSON.parse(props.arrivals || "[]");
+                         if (arrivals.length > 0) {
+                             arrivalsHtml = `<div style="margin-top: 6px; border-top: 1px solid #ddd; padding-top: 6px;">`;
+                             arrivalsHtml += `<div style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: #333;">Next Arrivals:</div>`;
+                             for (const arr of arrivals) {
+                                 const time = new Date(arr.ExpectedDepartureTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                                 const dest = arr.DestinationName50 || 'Unknown';
+                                 const line = arr.LinePublicNumber || '?';
+                                 arrivalsHtml += `
+                                 <div style="font-size: 11px; display: flex; justify-content: space-between; margin-bottom: 2px;">
+                                     <span style="font-weight:bold; margin-right: 6px; min-width: 20px;">${line}</span>
+                                     <span style="flex-grow: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; margin-right: 8px;" title="${dest}">${dest}</span>
+                                     <span>${time}</span>
+                                 </div>`;
+                             }
+                             arrivalsHtml += `</div>`;
+                         }
+                     } catch(err) {
+                         console.error("Error parsing arrivals for popup", err);
+                     }
 
                      const html = `
-                         <div style="font-family: Arial, sans-serif; padding: 2px;">
-                             <div style="font-weight: bold; font-size: 14px; margin-bottom: 4px;">${props.name}</div>
-                             <div style="font-size: 12px; color: #555;">${typeStr}</div>
+                         <div style="font-family: Arial, sans-serif; padding: 4px; min-width: 180px;">
+                             <div style="font-weight: bold; font-size: 14px; margin-bottom: 2px;">${props.name}</div>
+                             <div style="font-size: 12px; color: #666;">${typeStr}</div>
+                             ${arrivalsHtml}
                          </div>
                      `;
                      
