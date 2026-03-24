@@ -303,6 +303,9 @@
                
                  // 1. Bus Layer
                  map.addLayer({
+                    id: 'ret-bus',
+                    type: 'line',
+                    source: 'ret-data',
                     filter: ['==', 'layer', 'bus'],
                     layout: { 'line-join': 'round', 'line-cap': 'round' },
                     paint: {
@@ -314,6 +317,9 @@
 
                  // 2. Tram Layer
                  map.addLayer({
+                    id: 'ret-tram',
+                    type: 'line',
+                    source: 'ret-data',
                     filter: ['==', 'layer', 'tram'],
                     layout: { 'line-join': 'round', 'line-cap': 'round' },
                     paint: {
@@ -325,6 +331,9 @@
 
                  // 3. Metro Layer
                  map.addLayer({
+                    id: 'ret-metro',
+                    type: 'line',
+                    source: 'ret-data',
                     filter: ['==', 'layer', 'metro'],
                     layout: { 'line-join': 'round', 'line-cap': 'round' },
                     paint: {
@@ -418,7 +427,7 @@
 
   .search-container {
     position: absolute;
-    top: 20px;
+    top: 80px; /* 60px header + 20px padding */
     right: 20px;
     z-index: 10;
   }
