@@ -217,6 +217,19 @@
       };
       
       updateSearchLayer();
+
+      // Update selectedStop if it exists and matches a group so arrivals update in real-time
+      if (selectedStop && matchedGroups.has(selectedStop.name)) {
+          const group = matchedGroups.get(selectedStop.name);
+          const sortedArrivals = group.arrivals
+              .filter(a => a.expected_arrival)
+              .sort((a, b) => new Date(a.expected_arrival) - new Date(b.expected_arrival));
+          
+          selectedStop = {
+              ...selectedStop,
+              arrivals: sortedArrivals
+          };
+      }
       
       // Close panel if search changes and removes current stop
       if (!searchQuery.trim() || features.length === 0) {
@@ -271,10 +284,36 @@
                   stopDataMap.set(sData.id, sData);
               });
               
-              // Re-run search in case the searched stop was just added/updated
               if (searchQuery.trim()) {
                   handleSearch();
               }
+              
+              if (selectedStop) {
+                  const targetName = selectedStop.name;
+                  const allPassages = [];
+                  
+                  // Aggregate passages from all platforms with the matching name
+                  for (const s of stopDataMap.values()) {
+                      if (s.name === targetName && s.passages) {
+                          allPassages.push(...s.passages);
+                      }
+                  }
+                  
+                  // Sort and update if we found new data
+                  if (allPassages.length > 0) {
+                      allPassages.sort((a, b) => {
+                          const timeA = a.expected_arrival ? new Date(a.expected_arrival).getTime() : 0;
+                          const timeB = b.expected_arrival ? new Date(b.expected_arrival).getTime() : 0;
+                          return timeA - timeB;
+                      });
+                      
+                      // Only update if data actually changed to avoid re-renders? 
+                      // actually Svelte handles object identity checks, but we are creating a new object every time.
+                      // Let's just update it.
+                      selectedStop = { ...selectedStop, arrivals: allPassages };
+                  }
+              }
+
           } catch (err) {
               console.error(`Error parsing Stops SSE`, err);
           }
