@@ -48,7 +48,27 @@ BATCH_SIZE = 50            # Larger batches = fewer requests
 ALLOWED_TYPES = {"TRAM", "METRO", "BUS"}
 CONCURRENT_BATCHES = 3     # Parallel batch fetching
 
+# Standard deviations for boundaries (approximate bounding box for the RET network region)
+# This box roughly covers Rotterdam and surrounding areas serviced by RET
+MIN_LAT = 51.5  # Southern limit
+MAX_LAT = 52.2  # Northern limit
+MIN_LON = 3.8   # Western limit
+MAX_LON = 4.9   # Eastern limit
+
 # ============== HELPERS ==============
+
+def is_valid_coordinate(lat, lon):
+    """Check if coordinates are within the valid region"""
+    if lat is None or lon is None:
+        return False
+    # Only allow valid float coordinates
+    try:
+        lat = float(lat)
+        lon = float(lon)
+    except (ValueError, TypeError):
+        return False
+        
+    return MIN_LAT <= lat <= MAX_LAT and MIN_LON <= lon <= MAX_LON
 
 def hash_vehicle(v: dict) -> str:
     """Fast hash for detecting changes"""
@@ -160,12 +180,19 @@ async def poll_vehicles_and_stops():
                             # Build stop schedules
                             timing_point = stop.get("TimingPointCode")
                             if timing_point and stop.get("TripStopStatus") in ("PLANNED", "DRIVING"):
+                                lat = stop.get("Latitude")
+                                lon = stop.get("Longitude")
+                                
+                                # Validate coordinates before adding stop
+                                if not is_valid_coordinate(lat, lon):
+                                    continue
+
                                 if timing_point not in new_stops:
                                     new_stops[timing_point] = {
                                         "id": timing_point,
                                         "name": stop.get("TimingPointName", "Unknown"),
-                                        "lat": stop.get("Latitude"),
-                                        "lon": stop.get("Longitude"),
+                                        "lat": lat,
+                                        "lon": lon,
                                         "type": transport_type.lower(),
                                         "passages": []
                                     }
@@ -182,8 +209,8 @@ async def poll_vehicles_and_stops():
                             if stop.get("TripStopStatus") in ("DRIVING", "ARRIVED", "DEPARTING"):
                                 vehicle = normalize_vehicle_data(stop, journey_id, stop_id)
                                 
-                                # Skip if coordinates missing
-                                if not vehicle["lat"] or not vehicle["lon"]:
+                                # Skip if coordinates missing or invalid
+                                if not vehicle["lat"] or not vehicle["lon"] or not is_valid_coordinate(vehicle["lat"], vehicle["lon"]):
                                     continue
                                 
                                 new_vehicles[vehicle["id"]] = vehicle
