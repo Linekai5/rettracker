@@ -386,6 +386,60 @@ async def get_vehicle(vehicle_id: str):
         }
     return v
 
+@app.get("/vehicles/{vehicle_id}/live")
+async def get_vehicle_live(vehicle_id: str, request: Request):
+    """
+    Experimental high-frequency direct fetch for a single journey.
+    This bypasses the 2.5s global poll and hits OVAPI directly for the freshest data.
+    """
+    async def single_vehicle_generator():
+        last_hash = ""
+        while True:
+            if await request.is_disconnected():
+                break
+                
+            try:
+                # Direct call to OVAPI for this specific journey
+                url = f"https://v0.ovapi.nl/journey/{vehicle_id}"
+                resp = await http_client.get(url, timeout=5.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    journey = data.get(vehicle_id, {})
+                    stops = journey.get("Stops", {})
+                    
+                    # Find the "active" stop to get current lat/lon
+                    # OVAPI journeys provide coordinates per stop; we look for the one the vehicle is currently at/approaching
+                    active_stop = None
+                    for sid in sorted(stops.keys()):
+                        s = stops[sid]
+                        if s.get("TripStopStatus") in ("DRIVING", "ARRIVED", "DEPARTING"):
+                            active_stop = s
+                            # Don't break immediately, we want the *latest* active one
+                    
+                    if active_stop:
+                        v = normalize_vehicle_data(active_stop, vehicle_id, "")
+                        new_hash = hash_vehicle(v)
+                        
+                        if new_hash != last_hash:
+                            yield f"data: {json.dumps(v)}\n\n"
+                            last_hash = new_hash
+                
+            except Exception as e:
+                print(f"Direct fetch error for {vehicle_id}: {e}")
+            
+            # Poll every 1 second for the specific vehicle
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        single_vehicle_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        },
+    )
+
 @app.get("/")
 async def root():
     return {
