@@ -570,7 +570,7 @@
   const TRACK_ANIM_MS = 1000; // interpolation duration
   const TRACK_SOURCE_ID = 'tracking-vehicle-source';
   const TRACK_LAYER_ID = 'tracking-vehicle-layer';
-  const JITTER_THRESHOLD_METERS = 8; // small movement below this is considered stationary
+  const JITTER_THRESHOLD_METERS = 5; // small movement below this is considered stationary
 
   function stopTracking() {
       if (trackingInterval) {
@@ -580,6 +580,10 @@
       if (trackingAnimationFrame) {
           cancelAnimationFrame(trackingAnimationFrame);
           trackingAnimationFrame = null;
+      }
+      if (trackingPopup) {
+          trackingPopup.remove();
+          trackingPopup = null;
       }
       trackedVehicleId = null;
       trackingCurrentPos = null;
@@ -629,6 +633,43 @@
       };
       if (trackingAnimationFrame) cancelAnimationFrame(trackingAnimationFrame);
       trackingAnimationFrame = requestAnimationFrame(animate);
+  }
+
+  // New helper: animate along route between two distances along a line
+  function animateAlongRouteDistances(routeGeom, fromDist, toDist, duration = TRACK_ANIM_MS) {
+      if (!routeGeom || fromDist === null || toDist === null) return;
+      
+      const start = performance.now();
+      const step = (now) => {
+          const t = Math.min(1, (now - start) / duration);
+          const currentDist = lerp(fromDist, toDist, t);
+          try {
+              const pt = turf.along(routeGeom, currentDist, { units: 'kilometers' });
+              const coords = pt.geometry.coordinates;
+              if (map && map.getSource(TRACK_SOURCE_ID)) {
+                  map.getSource(TRACK_SOURCE_ID).setData({ 
+                      type: 'FeatureCollection', 
+                      features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: coords } }] 
+                  });
+              }
+              trackingCurrentPos = coords.slice();
+              
+              // update popup position
+              if (trackingPopup) {
+                  trackingPopup.setLngLat(trackingCurrentPos);
+              }
+          } catch (e) {
+              console.error("Error in animateAlongRouteDistances step", e);
+          }
+
+          if (t < 1) {
+              trackingAnimationFrame = requestAnimationFrame(step);
+          } else {
+              trackingAnimationFrame = null;
+          }
+      };
+      if (trackingAnimationFrame) cancelAnimationFrame(trackingAnimationFrame);
+      trackingAnimationFrame = requestAnimationFrame(step);
   }
 
   // New helper: animate along route between two coordinates (snapped to route)
@@ -716,7 +757,11 @@
               if (trackingRouteGeom) {
                   trackingRouteLengthKm = turf.length(trackingRouteGeom, { units: 'kilometers' });
               }
-          } catch(e) { trackingRouteGeom = null; trackingRouteLengthKm = 0; }
+          } catch(e) { 
+              console.error("Error resolving geometry", e);
+              trackingRouteGeom = null; 
+              trackingRouteLengthKm = 0; 
+          }
 
           const pos = [v.lon, v.lat];
           trackingCurrentPos = pos.slice();
@@ -725,17 +770,37 @@
           if (trackingRouteGeom) {
               try {
                   const snapped = turf.nearestPointOnLine(trackingRouteGeom, pos);
-                  trackingCurrentDistKm = snapped && snapped.properties && (snapped.properties.location || snapped.properties.index) ? snapped.properties.location : null;
-                  // In some turf versions location is in kilometers; if not present, compute by projecting index*segment length fallback
-              } catch(e) { trackingCurrentDistKm = null; }
+                  trackingCurrentDistKm = snapped && snapped.properties ? snapped.properties.location : 0;
+                  
+                  // Update position to the snapped one
+                  const snappedPt = turf.along(trackingRouteGeom, trackingCurrentDistKm, { units: 'kilometers' });
+                  trackingCurrentPos = snappedPt.geometry.coordinates.slice();
+              } catch(e) { 
+                  console.error("Error snapping initial point", e);
+                  trackingCurrentDistKm = 0; 
+              }
           }
 
           if (map && map.getSource(TRACK_SOURCE_ID)) {
-              map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: pos } }] });
+              map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: trackingCurrentPos } }] });
           }
 
           // update metadata initially
           updateTrackingMeta(v);
+
+          // Fly to vehicle
+          if (map) {
+              map.flyTo({
+                  center: trackingCurrentPos,
+                  zoom: 15,
+                  duration: 1000
+              });
+          }
+
+          // Initial popup
+          if (trackingPopup) {
+              trackingPopup.setLngLat(trackingCurrentPos).setHTML(renderTrackingPopup()).addTo(map);
+          }
       }
 
       trackingInterval = setInterval(async () => {
@@ -749,49 +814,44 @@
 
               if (trackingRouteGeom) {
                   // compute distance along line for current and new positions
-                  let newSnapped = null;
-                  try { newSnapped = turf.nearestPointOnLine(trackingRouteGeom, newPos); } catch(e) { newSnapped = null; }
-                  const newDistKm = newSnapped && newSnapped.properties ? (newSnapped.properties.location || null) : null;
-
-                  // if we don't have previous dist, set directly
-                  if (trackingCurrentDistKm == null) {
-                      if (newDistKm != null) {
-                          trackingCurrentDistKm = newDistKm;
-                          // set marker
-                          const pt = turf.along(trackingRouteGeom, Math.max(0, Math.min(trackingRouteLengthKm, trackingCurrentDistKm)), { units: 'kilometers' });
-                          const coords = pt.geometry.coordinates;
-                          if (map && map.getSource(TRACK_SOURCE_ID)) map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: coords } }] });
-                          trackingCurrentPos = coords.slice();
-                      }
-                  } else if (newDistKm != null) {
-                      const movedMeters = Math.abs(newDistKm - trackingCurrentDistKm) * 1000;
-                      if (movedMeters < JITTER_THRESHOLD_METERS) {
-                          // consider stationary; update popup only
-                          trackingCurrentPos = turf.along(trackingRouteGeom, trackingCurrentDistKm, { units: 'kilometers' }).geometry.coordinates;
-                          if (map && map.getSource(TRACK_SOURCE_ID)) map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: trackingCurrentPos } }] });
-                      } else {
-                          // animate along route from current dist to newDistKm
-                          const fromDist = trackingCurrentDistKm;
-                          const toDist = newDistKm;
-                          animateAlongCoords(trackingRouteGeom, fromDist, toDist, TRACK_ANIM_MS);
-                          trackingCurrentDistKm = newDistKm;
-                      }
-                  } else {
-                      // no route projection, fallback to simple animation between coords
-                      if (!trackingCurrentPos) trackingCurrentPos = newPos.slice();
-                      animateMarker(trackingCurrentPos.slice(), newPos.slice(), TRACK_ANIM_MS);
+                  let newDistKm = 0;
+                  try { 
+                      const newSnapped = turf.nearestPointOnLine(trackingRouteGeom, newPos); 
+                      newDistKm = newSnapped && newSnapped.properties ? newSnapped.properties.location : 0;
+                  } catch(e) { 
+                      console.error("Error snapping new point", e);
+                      newDistKm = trackingCurrentDistKm; 
                   }
 
+                  if (trackingCurrentDistKm === null) {
+                      trackingCurrentDistKm = newDistKm;
+                      const pt = turf.along(trackingRouteGeom, trackingCurrentDistKm, { units: 'kilometers' });
+                      trackingCurrentPos = pt.geometry.coordinates.slice();
+                      if (map && map.getSource(TRACK_SOURCE_ID)) {
+                          map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: trackingCurrentPos } }] });
+                      }
+                  } else {
+                      const movedMeters = Math.abs(newDistKm - trackingCurrentDistKm) * 1000;
+                      if (movedMeters < JITTER_THRESHOLD_METERS) {
+                          // stationary, just update popup content if needed
+                          if (trackingPopup) trackingPopup.setHTML(renderTrackingPopup());
+                      } else {
+                          // animate along route
+                          const fromDist = trackingCurrentDistKm;
+                          const toDist = newDistKm;
+                          animateAlongRouteDistances(trackingRouteGeom, fromDist, toDist, TRACK_ANIM_MS);
+                          trackingCurrentDistKm = newDistKm;
+                      }
+                  }
               } else {
                   // no route geom, fallback to simple animation
                   if (!trackingCurrentPos) trackingCurrentPos = newPos.slice();
                   animateMarker(trackingCurrentPos.slice(), newPos.slice(), TRACK_ANIM_MS);
               }
 
-              // update popup position/content
+              // update popup content
               if (trackingPopup) {
-                  const popupPos = trackingCurrentPos || newPos;
-                  trackingPopup.setLngLat(popupPos).setHTML(renderTrackingPopup()).addTo(map);
+                  trackingPopup.setHTML(renderTrackingPopup());
               }
           }
       }, TRACK_POLL_MS);
@@ -803,21 +863,39 @@
       const lastSeen = v.timestamp || now.toISOString();
       // Gather next stops from stopDataMap where journey_id matches
       const nextStops = [];
+      const vehicleJourneyId = (v.entity_id || v.id || "").toString();
+
       for (const s of stopDataMap.values()) {
           if (s.passages && Array.isArray(s.passages)) {
               for (const p of s.passages) {
-                  if (p.journey_id === v.entity_id || p.journey_id === v.id) {
-                      nextStops.push({ name: s.name || p.timing_point || 'Unknown', expected_arrival: p.expected_arrival });
+                  const passageJourneyId = (p.journey_id || "").toString();
+                  if (passageJourneyId === vehicleJourneyId) {
+                      nextStops.push({ 
+                          name: s.name || p.timing_point || 'Unknown', 
+                          expected_arrival: p.expected_arrival 
+                      });
                   }
               }
           }
       }
+      // Sort and deduplicate based on arrival time (same vehicle might visit multiple platforms at one stop)
       nextStops.sort((a, b) => new Date(a.expected_arrival) - new Date(b.expected_arrival));
+      
+      const uniqueNextStops = [];
+      const seenTimes = new Set();
+      for (const ns of nextStops) {
+          const t = new Date(ns.expected_arrival).getTime();
+          if (!seenTimes.has(t)) {
+              uniqueNextStops.push(ns);
+              seenTimes.add(t);
+          }
+      }
+
       trackingMeta = {
           line: v.line,
           destination: v.destination,
           lastSeen: lastSeen,
-          nextStops: nextStops.slice(0,5)
+          nextStops: uniqueNextStops.slice(0, 5)
       };
   }
 
