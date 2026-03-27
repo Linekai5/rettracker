@@ -243,6 +243,8 @@
   }
 
   function closePanel() {
+      // stop tracking when closing the panel
+      stopTracking();
       selectedStop = null;
       if (map) {
           map.flyTo({
@@ -509,6 +511,9 @@
                          typeList = JSON.parse(props.typeList || "[]");
                      } catch(err) {}
                      
+                     // stop any previous vehicle tracking when selecting a new stop
+                     stopTracking();
+                     
                      selectedStop = {
                          name: props.name,
                          types: typeList.map(t => t.charAt(0).toUpperCase() + t.slice(1)),
@@ -549,6 +554,129 @@
      if (hoverPopup) hoverPopup.remove();
      stopDataMap.clear();
   });
+
+  let trackedVehicleId = null;
+  let trackingInterval = null;
+  let trackingAnimationFrame = null;
+  let trackingCurrentPos = null; // [lon, lat]
+  const TRACK_POLL_MS = 1500; // how often to fetch single-vehicle updates
+  const TRACK_ANIM_MS = 1000; // interpolation duration
+  const TRACK_SOURCE_ID = 'tracking-vehicle-source';
+  const TRACK_LAYER_ID = 'tracking-vehicle-layer';
+
+  function stopTracking() {
+      if (trackingInterval) {
+          clearInterval(trackingInterval);
+          trackingInterval = null;
+      }
+      if (trackingAnimationFrame) {
+          cancelAnimationFrame(trackingAnimationFrame);
+          trackingAnimationFrame = null;
+      }
+      trackedVehicleId = null;
+      trackingCurrentPos = null;
+      if (map) {
+          try {
+              if (map.getLayer(TRACK_LAYER_ID)) map.removeLayer(TRACK_LAYER_ID);
+          } catch(e) {}
+          try {
+              if (map.getSource(TRACK_SOURCE_ID)) map.removeSource(TRACK_SOURCE_ID);
+          } catch(e) {}
+      }
+  }
+
+  async function fetchVehicleOnce(id) {
+      if (!id) return null;
+      try {
+          const res = await fetch(`${API_BASE}/vehicles/${id}`);
+          if (!res.ok) return null;
+          const v = await res.json();
+          if (!v || !v.lat || !v.lon) return null;
+          return v;
+      } catch (e) {
+          console.error('Error fetching vehicle', e);
+          return null;
+      }
+  }
+
+  function lerp(a, b, t) {
+      return a + (b - a) * t;
+  }
+
+  function animateMarker(from, to, duration = TRACK_ANIM_MS) {
+      const start = performance.now();
+      const animate = (now) => {
+          const t = Math.min(1, (now - start) / duration);
+          const curLon = lerp(from[0], to[0], t);
+          const curLat = lerp(from[1], to[1], t);
+          if (map && map.getSource(TRACK_SOURCE_ID)) {
+              map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: [curLon, curLat] } }] });
+          }
+          if (t < 1) {
+              trackingAnimationFrame = requestAnimationFrame(animate);
+          } else {
+              trackingAnimationFrame = null;
+              trackingCurrentPos = to.slice();
+          }
+      };
+      if (trackingAnimationFrame) cancelAnimationFrame(trackingAnimationFrame);
+      trackingAnimationFrame = requestAnimationFrame(animate);
+  }
+
+  async function startTracking(vehicleId) {
+      if (!vehicleId) return;
+      // If same vehicle already tracked, do nothing
+      if (trackedVehicleId === vehicleId) return;
+
+      // Stop any existing tracking
+      stopTracking();
+
+      trackedVehicleId = vehicleId;
+
+      // Ensure map source/layer exist
+      if (map && !map.getSource(TRACK_SOURCE_ID)) {
+          map.addSource(TRACK_SOURCE_ID, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+          map.addLayer({
+              id: TRACK_LAYER_ID,
+              type: 'circle',
+              source: TRACK_SOURCE_ID,
+              paint: {
+                  'circle-radius': 8,
+                  'circle-color': '#FFD500',
+                  'circle-stroke-width': 2,
+                  'circle-stroke-color': '#000'
+              }
+          });
+      }
+
+      // One-off immediate fetch + start polling
+      const v = await fetchVehicleOnce(vehicleId);
+      if (v) {
+          const pos = [v.lon, v.lat];
+          trackingCurrentPos = pos.slice();
+          if (map && map.getSource(TRACK_SOURCE_ID)) {
+              map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: pos } }] });
+          }
+      }
+
+      trackingInterval = setInterval(async () => {
+          if (!trackedVehicleId) return;
+          const nv = await fetchVehicleOnce(trackedVehicleId);
+          if (nv && nv.lon && nv.lat) {
+              const newPos = [nv.lon, nv.lat];
+              if (!trackingCurrentPos) {
+                  trackingCurrentPos = newPos.slice();
+                  if (map && map.getSource(TRACK_SOURCE_ID)) map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: newPos } }] });
+              } else {
+                  // animate from current to new
+                  animateMarker(trackingCurrentPos.slice(), newPos.slice(), TRACK_ANIM_MS);
+              }
+
+              // Optionally pan map to keep vehicle in view
+              // map.panTo(newPos);
+          }
+      }, TRACK_POLL_MS);
+  }
 </script>
 
 <div class="search-container">
@@ -573,7 +701,7 @@
     
     <div class="arrivals-list">
         {#each selectedStop.arrivals.filter(a => selectedModeFilter === 'all' || (a.type || '').toLowerCase() === selectedModeFilter || selectedStop.types.length === 1) as arr}
-            <div class="arrival-item">
+            <div class="arrival-item" on:click={() => startTracking(arr.journey_id)} class:tracking={trackedVehicleId === arr.journey_id}>
                 <div class="arrival-line">{arr.line || '?'}</div>
                 <div class="arrival-dest">{arr.destination || 'Unknown'}</div>
                 <div class="arrival-time">{new Date(arr.expected_arrival).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
@@ -690,8 +818,19 @@
   .arrival-item {
     display: flex;
     align-items: center;
-    padding: 8px 0;
-    border-bottom: 1px solid #f0f0f0;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid #f1f1f1;
+    cursor: pointer;
+  }
+
+  .arrival-item:hover {
+    background: #fafafa;
+  }
+
+  .arrival-item.tracking {
+    background: linear-gradient(90deg, rgba(255,213,0,0.12), rgba(255,213,0,0.06));
+    border-left: 4px solid #FFD500;
   }
   
   .arrival-line {

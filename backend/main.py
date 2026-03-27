@@ -375,6 +375,17 @@ async def get_stops():
         "timestamp": last_stops_fetch_time
     }
 
+@app.get("/vehicles/{vehicle_id}")
+async def get_vehicle(vehicle_id: str):
+    """REST endpoint for a single vehicle snapshot by id"""
+    v = current_vehicles.get(vehicle_id)
+    if v is None:
+        return {
+            "error": "not found",
+            "id": vehicle_id
+        }
+    return v
+
 @app.get("/")
 async def root():
     return {
