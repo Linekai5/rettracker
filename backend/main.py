@@ -145,17 +145,18 @@ async def poll_vehicles_and_stops():
         try:
             now = time.time()
             
-            if now - last_fetch_time < FETCH_INTERVAL:
-                await asyncio.sleep(0.5)
-                continue
-            
             # Fetch journey keys
+            # Use -k/verify=False because of the SSL certificate mismatch on v0.ovapi.nl
             resp_keys = await http_client.get("https://v0.ovapi.nl/journey/")
             resp_keys.raise_for_status()
-            journey_keys = [k for k in resp_keys.json().keys() if k.startswith("RET_")]
+            
+            # Fetch all journey keys starting with "RET_"
+            all_keys = resp_keys.json()
+            journey_keys = [k for k in all_keys.keys() if k.startswith("RET_")]
             
             if not journey_keys:
-                await asyncio.sleep(2.0)
+                print("No RET journeys found in OVAPI")
+                await asyncio.sleep(5.0)
                 continue
             
             # Parallel batch fetching
@@ -171,6 +172,21 @@ async def poll_vehicles_and_stops():
                 for journeys in results:
                     for journey_id, journey in journeys.items():
                         stops = journey.get("Stops", {})
+                        
+                        # Sort stops by sequence/time to find current position
+                        active_stops = sorted(
+                            [s for s in stops.values() if s.get("TripStopStatus") in ("DRIVING", "ARRIVED", "DEPARTING")],
+                            key=lambda x: x.get("ExpectedArrivalTime", x.get("TargetArrivalTime", "00:00:00"))
+                        )
+                        
+                        # Use the latest active stop for vehicle position
+                        if active_stops:
+                            latest_stop = active_stops[-1]
+                            vehicle = normalize_vehicle_data(latest_stop, journey_id, "")
+                            
+                            if is_valid_coordinate(vehicle["lat"], vehicle["lon"]):
+                                new_vehicles[journey_id] = vehicle
+
                         for stop_id, stop in stops.items():
                             transport_type = stop.get("TransportType")
                             
@@ -206,15 +222,6 @@ async def poll_vehicles_and_stops():
                                     "type": transport_type.lower()
                                 })
 
-                            if stop.get("TripStopStatus") in ("DRIVING", "ARRIVED", "DEPARTING"):
-                                vehicle = normalize_vehicle_data(stop, journey_id, stop_id)
-                                
-                                # Skip if coordinates missing or invalid
-                                if not vehicle["lat"] or not vehicle["lon"] or not is_valid_coordinate(vehicle["lat"], vehicle["lon"]):
-                                    continue
-                                
-                                new_vehicles[vehicle["id"]] = vehicle
-            
             # Sort passages for each stop by arrival time and trim to next 5
             for stop_id, stop_data in new_stops.items():
                 stop_data["passages"].sort(key=lambda x: x["expected_arrival"] if x["expected_arrival"] else "9999-99-99")
