@@ -446,7 +446,7 @@
                     type: 'circle',
                     source: 'search-stop-source',
                     paint: {
-                        'circle-color': '#FFD500',
+                        'circle-color': '#FFF',
                         'circle-radius': ['case', ['boolean', ['feature-state', 'hover'], false], 8, 5],
                         'circle-stroke-width': 1.5,
                         'circle-stroke-color': '#000000'
