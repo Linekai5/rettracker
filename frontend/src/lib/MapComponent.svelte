@@ -331,6 +331,7 @@
 
     const maplibreModule = await import('maplibre-gl');
     const maplibregl = maplibreModule.default || maplibreModule;
+    maplibreglVar = maplibregl;
 
     // Initialize the shared hover popup
     hoverPopup = new maplibregl.Popup({ offset: 10, closeButton: false, closeOnClick: false });
@@ -555,14 +556,21 @@
      stopDataMap.clear();
   });
 
+  let maplibreglVar = null;
   let trackedVehicleId = null;
   let trackingInterval = null;
   let trackingAnimationFrame = null;
   let trackingCurrentPos = null; // [lon, lat]
+  let trackingRouteGeom = null; // turf LineString/MultiLineString
+  let trackingRouteLengthKm = 0;
+  let trackingCurrentDistKm = null; // distance along line in km
+  let trackingPopup = null;
+  let trackingMeta = null; // { line, destination, lastSeen, nextStops: [{name, expected_arrival}], ... }
   const TRACK_POLL_MS = 1500; // how often to fetch single-vehicle updates
   const TRACK_ANIM_MS = 1000; // interpolation duration
   const TRACK_SOURCE_ID = 'tracking-vehicle-source';
   const TRACK_LAYER_ID = 'tracking-vehicle-layer';
+  const JITTER_THRESHOLD_METERS = 8; // small movement below this is considered stationary
 
   function stopTracking() {
       if (trackingInterval) {
@@ -623,6 +631,49 @@
       trackingAnimationFrame = requestAnimationFrame(animate);
   }
 
+  // New helper: animate along route between two coordinates (snapped to route)
+  function animateAlongCoords(routeGeom, fromCoord, toCoord, duration = TRACK_ANIM_MS) {
+      // Ensure from/to are [lon, lat]
+      if (!fromCoord || !toCoord) {
+          if (toCoord && map && map.getSource(TRACK_SOURCE_ID)) {
+              map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: toCoord } }] });
+              trackingCurrentPos = toCoord.slice();
+          }
+          return;
+      }
+      try {
+          const fromPt = turf.point(fromCoord);
+          const toPt = turf.point(toCoord);
+          const slice = turf.lineSlice(fromPt, toPt, routeGeom);
+          const sliceLenKm = turf.length(slice, { units: 'kilometers' });
+
+          if (sliceLenKm === 0) {
+              if (map && map.getSource(TRACK_SOURCE_ID)) map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: toCoord } }] });
+              trackingCurrentPos = toCoord.slice();
+              return;
+          }
+
+          const start = performance.now();
+          const step = (now) => {
+              const t = Math.min(1, (now - start) / duration);
+              const distKm = t * sliceLenKm;
+              const pt = turf.along(slice, distKm, { units: 'kilometers' });
+              const coords = pt.geometry.coordinates;
+              if (map && map.getSource(TRACK_SOURCE_ID)) {
+                  map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: coords } }] });
+              }
+              trackingCurrentPos = coords.slice();
+              if (t < 1) trackingAnimationFrame = requestAnimationFrame(step);
+              else trackingAnimationFrame = null;
+          };
+          if (trackingAnimationFrame) cancelAnimationFrame(trackingAnimationFrame);
+          trackingAnimationFrame = requestAnimationFrame(step);
+      } catch (e) {
+          // fallback to linear animation
+          animateMarker(fromCoord, toCoord, duration);
+      }
+  }
+
   async function startTracking(vehicleId) {
       if (!vehicleId) return;
       // If same vehicle already tracked, do nothing
@@ -649,34 +700,142 @@
           });
       }
 
+      // create popup if possible
+      try {
+          if (map && maplibreglVar) {
+              trackingPopup = new maplibreglVar.Popup({ offset: 10, closeButton: false, closeOnClick: false });
+          }
+      } catch(e) { trackingPopup = null; }
+
       // One-off immediate fetch + start polling
       const v = await fetchVehicleOnce(vehicleId);
       if (v) {
+          // resolve route geometry for snapping
+          try {
+              trackingRouteGeom = resolveGeometry(v);
+              if (trackingRouteGeom) {
+                  trackingRouteLengthKm = turf.length(trackingRouteGeom, { units: 'kilometers' });
+              }
+          } catch(e) { trackingRouteGeom = null; trackingRouteLengthKm = 0; }
+
           const pos = [v.lon, v.lat];
           trackingCurrentPos = pos.slice();
+
+          // compute initial distance along route if geom exists
+          if (trackingRouteGeom) {
+              try {
+                  const snapped = turf.nearestPointOnLine(trackingRouteGeom, pos);
+                  trackingCurrentDistKm = snapped && snapped.properties && (snapped.properties.location || snapped.properties.index) ? snapped.properties.location : null;
+                  // In some turf versions location is in kilometers; if not present, compute by projecting index*segment length fallback
+              } catch(e) { trackingCurrentDistKm = null; }
+          }
+
           if (map && map.getSource(TRACK_SOURCE_ID)) {
               map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: pos } }] });
           }
+
+          // update metadata initially
+          updateTrackingMeta(v);
       }
 
       trackingInterval = setInterval(async () => {
           if (!trackedVehicleId) return;
           const nv = await fetchVehicleOnce(trackedVehicleId);
           if (nv && nv.lon && nv.lat) {
+              // update metadata each poll
+              updateTrackingMeta(nv);
+
               const newPos = [nv.lon, nv.lat];
-              if (!trackingCurrentPos) {
-                  trackingCurrentPos = newPos.slice();
-                  if (map && map.getSource(TRACK_SOURCE_ID)) map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: newPos } }] });
+
+              if (trackingRouteGeom) {
+                  // compute distance along line for current and new positions
+                  let newSnapped = null;
+                  try { newSnapped = turf.nearestPointOnLine(trackingRouteGeom, newPos); } catch(e) { newSnapped = null; }
+                  const newDistKm = newSnapped && newSnapped.properties ? (newSnapped.properties.location || null) : null;
+
+                  // if we don't have previous dist, set directly
+                  if (trackingCurrentDistKm == null) {
+                      if (newDistKm != null) {
+                          trackingCurrentDistKm = newDistKm;
+                          // set marker
+                          const pt = turf.along(trackingRouteGeom, Math.max(0, Math.min(trackingRouteLengthKm, trackingCurrentDistKm)), { units: 'kilometers' });
+                          const coords = pt.geometry.coordinates;
+                          if (map && map.getSource(TRACK_SOURCE_ID)) map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: coords } }] });
+                          trackingCurrentPos = coords.slice();
+                      }
+                  } else if (newDistKm != null) {
+                      const movedMeters = Math.abs(newDistKm - trackingCurrentDistKm) * 1000;
+                      if (movedMeters < JITTER_THRESHOLD_METERS) {
+                          // consider stationary; update popup only
+                          trackingCurrentPos = turf.along(trackingRouteGeom, trackingCurrentDistKm, { units: 'kilometers' }).geometry.coordinates;
+                          if (map && map.getSource(TRACK_SOURCE_ID)) map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: trackingCurrentPos } }] });
+                      } else {
+                          // animate along route from current dist to newDistKm
+                          const fromDist = trackingCurrentDistKm;
+                          const toDist = newDistKm;
+                          animateAlongCoords(trackingRouteGeom, fromDist, toDist, TRACK_ANIM_MS);
+                          trackingCurrentDistKm = newDistKm;
+                      }
+                  } else {
+                      // no route projection, fallback to simple animation between coords
+                      if (!trackingCurrentPos) trackingCurrentPos = newPos.slice();
+                      animateMarker(trackingCurrentPos.slice(), newPos.slice(), TRACK_ANIM_MS);
+                  }
+
               } else {
-                  // animate from current to new
+                  // no route geom, fallback to simple animation
+                  if (!trackingCurrentPos) trackingCurrentPos = newPos.slice();
                   animateMarker(trackingCurrentPos.slice(), newPos.slice(), TRACK_ANIM_MS);
               }
 
-              // Optionally pan map to keep vehicle in view
-              // map.panTo(newPos);
+              // update popup position/content
+              if (trackingPopup) {
+                  const popupPos = trackingCurrentPos || newPos;
+                  trackingPopup.setLngLat(popupPos).setHTML(renderTrackingPopup()).addTo(map);
+              }
           }
       }, TRACK_POLL_MS);
   }
+
+  function updateTrackingMeta(v) {
+      // v is vehicle data { id, lat, lon, line, destination, timestamp }
+      const now = new Date();
+      const lastSeen = v.timestamp || now.toISOString();
+      // Gather next stops from stopDataMap where journey_id matches
+      const nextStops = [];
+      for (const s of stopDataMap.values()) {
+          if (s.passages && Array.isArray(s.passages)) {
+              for (const p of s.passages) {
+                  if (p.journey_id === v.entity_id || p.journey_id === v.id) {
+                      nextStops.push({ name: s.name || p.timing_point || 'Unknown', expected_arrival: p.expected_arrival });
+                  }
+              }
+          }
+      }
+      nextStops.sort((a, b) => new Date(a.expected_arrival) - new Date(b.expected_arrival));
+      trackingMeta = {
+          line: v.line,
+          destination: v.destination,
+          lastSeen: lastSeen,
+          nextStops: nextStops.slice(0,5)
+      };
+  }
+
+  function renderTrackingPopup() {
+      if (!trackingMeta) return `<div style="font-size:12px;padding:6px">Tracking...</div>`;
+      const lines = [`<div style="font-weight:bold">${trackingMeta.line || '?'} → ${trackingMeta.destination || 'Unknown'}</div>`];
+      lines.push(`<div style="font-size:11px;color:#666">Last: ${new Date(trackingMeta.lastSeen).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</div>`);
+      if (trackingMeta.nextStops && trackingMeta.nextStops.length) {
+          lines.push('<div style="margin-top:6px;font-size:12px">Next stops:</div>');
+          lines.push('<ul style="margin:4px 0 0 14px;padding:0;font-size:12px;color:#333">');
+          for (const s of trackingMeta.nextStops) {
+              lines.push(`<li>${s.name} — ${new Date(s.expected_arrival).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</li>`);
+          }
+          lines.push('</ul>');
+      }
+      return lines.join('');
+  }
+
 </script>
 
 <div class="search-container">
@@ -700,15 +859,32 @@
     {/if}
     
     <div class="arrivals-list">
-        {#each selectedStop.arrivals.filter(a => selectedModeFilter === 'all' || (a.type || '').toLowerCase() === selectedModeFilter || selectedStop.types.length === 1) as arr}
-            <div class="arrival-item" on:click={() => startTracking(arr.journey_id)} class:tracking={trackedVehicleId === arr.journey_id}>
-                <div class="arrival-line">{arr.line || '?'}</div>
-                <div class="arrival-dest">{arr.destination || 'Unknown'}</div>
-                <div class="arrival-time">{new Date(arr.expected_arrival).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+        {#if trackedVehicleId && trackingMeta}
+            <div class="tracking-panel">
+                <div style="font-weight:bold; margin-bottom:6px">{trackingMeta.line || '?'} → {trackingMeta.destination || 'Unknown'}</div>
+                <div style="font-size:12px; color:#666">Last seen: {new Date(trackingMeta.lastSeen).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</div>
+                {#if trackingMeta.nextStops && trackingMeta.nextStops.length}
+                    <div style="margin-top:8px; font-weight:600">Upcoming stops</div>
+                    <ul style="margin:6px 0 0 14px; padding:0; font-size:13px; color:#333">
+                        {#each trackingMeta.nextStops as ns}
+                            <li style="margin-bottom:4px">{ns.name} — {new Date(ns.expected_arrival).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</li>
+                        {/each}
+                    </ul>
+                {:else}
+                    <div style="padding:10px; color:#666">No stop predictions available.</div>
+                {/if}
             </div>
-        {/each}
-        {#if selectedStop.arrivals.filter(a => selectedModeFilter === 'all' || (a.type || '').toLowerCase() === selectedModeFilter || selectedStop.types.length === 1).length === 0}
-            <div style="padding: 10px; color: #666;">No upcoming arrivals.</div>
+        {:else}
+            {#each selectedStop.arrivals.filter(a => selectedModeFilter === 'all' || (a.type || '').toLowerCase() === selectedModeFilter || selectedStop.types.length === 1) as arr}
+                <div class="arrival-item" on:click={() => startTracking(arr.journey_id)} class:tracking={trackedVehicleId === arr.journey_id}>
+                    <div class="arrival-line">{arr.line || '?'}</div>
+                    <div class="arrival-dest">{arr.destination || 'Unknown'}</div>
+                    <div class="arrival-time">{new Date(arr.expected_arrival).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+                </div>
+            {/each}
+            {#if selectedStop.arrivals.filter(a => selectedModeFilter === 'all' || (a.type || '').toLowerCase() === selectedModeFilter || selectedStop.types.length === 1).length === 0}
+                <div style="padding: 10px; color: #666;">No upcoming arrivals.</div>
+            {/if}
         {/if}
     </div>
 </div>
@@ -850,5 +1026,12 @@
     font-family: monospace;
     font-size: 14px;
     color: #333;
+  }
+
+  .tracking-panel {
+    padding: 10px 15px;
+    background: #f0f8ff;
+    border-radius: 8px;
+    margin-top: 10px;
   }
 </style>
