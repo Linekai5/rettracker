@@ -566,6 +566,10 @@
   let trackingCurrentDistKm = null; // distance along line in km
   let trackingPopup = null;
   let trackingMeta = null; // { line, destination, lastSeen, nextStops: [{name, expected_arrival}], ... }
+  let trackingAllStops = []; // New: all stops for dead reckoning
+  let deadReckoningInterval = null;
+  let lastSSEUpdateTime = 0; // New: throttle dead reckoning if SSE is very fresh
+
   const TRACK_POLL_MS = 1500; // how often to fetch single-vehicle updates
   const TRACK_ANIM_MS = 1000; // interpolation duration
   const TRACK_SOURCE_ID = 'tracking-vehicle-source';
@@ -578,6 +582,10 @@
       if (trackingSSE) {
           trackingSSE.close();
           trackingSSE = null;
+      }
+      if (deadReckoningInterval) {
+          clearInterval(deadReckoningInterval);
+          deadReckoningInterval = null;
       }
       if (trackingInterval) {
           clearInterval(trackingInterval);
@@ -593,6 +601,7 @@
       }
       trackedVehicleId = null;
       trackingCurrentPos = null;
+      trackingAllStops = [];
       if (map) {
           try {
               if (map.getLayer(TRACK_LAYER_ID)) map.removeLayer(TRACK_LAYER_ID);
@@ -646,28 +655,11 @@
       if (!routeGeom || fromDist === null || toDist === null) return;
       
       const start = performance.now();
-      const step = (now) => {
+      const step = () => {
+          const now = performance.now();
           const t = Math.min(1, (now - start) / duration);
           const currentDist = lerp(fromDist, toDist, t);
-          try {
-              const pt = turf.along(routeGeom, currentDist, { units: 'kilometers' });
-              const coords = pt.geometry.coordinates;
-              if (map && map.getSource(TRACK_SOURCE_ID)) {
-                  map.getSource(TRACK_SOURCE_ID).setData({ 
-                      type: 'FeatureCollection', 
-                      features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: coords } }] 
-                  });
-              }
-              trackingCurrentPos = coords.slice();
-              
-              // update popup position
-              if (trackingPopup) {
-                  trackingPopup.setLngLat(trackingCurrentPos);
-              }
-          } catch (e) {
-              console.error("Error in animateAlongRouteDistances step", e);
-          }
-
+          updatePositionAtDistance(currentDist);
           if (t < 1) {
               trackingAnimationFrame = requestAnimationFrame(step);
           } else {
@@ -678,47 +670,91 @@
       trackingAnimationFrame = requestAnimationFrame(step);
   }
 
-  // New helper: animate along route between two coordinates (snapped to route)
-  function animateAlongCoords(routeGeom, fromCoord, toCoord, duration = TRACK_ANIM_MS) {
-      // Ensure from/to are [lon, lat]
-      if (!fromCoord || !toCoord) {
-          if (toCoord && map && map.getSource(TRACK_SOURCE_ID)) {
-              map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: toCoord } }] });
-              trackingCurrentPos = toCoord.slice();
-          }
-          return;
-      }
+  function updatePositionAtDistance(distKm) {
+      if (!trackingRouteGeom) return;
       try {
-          const fromPt = turf.point(fromCoord);
-          const toPt = turf.point(toCoord);
-          const slice = turf.lineSlice(fromPt, toPt, routeGeom);
-          const sliceLenKm = turf.length(slice, { units: 'kilometers' });
+          const pt = turf.along(trackingRouteGeom, distKm, { units: 'kilometers' });
+          const coords = pt.geometry.coordinates;
+          if (map && map.getSource(TRACK_SOURCE_ID)) {
+              map.getSource(TRACK_SOURCE_ID).setData({ 
+                  type: 'FeatureCollection', 
+                  features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: coords } }] 
+              });
+          }
+          trackingCurrentPos = coords.slice();
+          
+          // update popup position
+          if (trackingPopup) {
+              trackingPopup.setLngLat(trackingCurrentPos);
+          }
+      } catch (e) {
+          console.error("Error updating position at distance", e);
+      }
+  }
 
-          if (sliceLenKm === 0) {
-              if (map && map.getSource(TRACK_SOURCE_ID)) map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: toCoord } }] });
-              trackingCurrentPos = toCoord.slice();
-              return;
+  function startDeadReckoning() {
+      if (deadReckoningInterval) clearInterval(deadReckoningInterval);
+      deadReckoningInterval = setInterval(() => {
+          if (!trackingAllStops.length || !trackingRouteGeom) return;
+
+          // If we just got an SSE update in the last 1.5s, let's not fight it
+          if (Date.now() - lastSSEUpdateTime < 1500) return;
+
+          const now = new Date();
+          // Find the segment the vehicle is currently in
+          let prevStop = null;
+          let nextStop = null;
+
+          for (let i = 0; i < trackingAllStops.length; i++) {
+              const s = trackingAllStops[i];
+              const arrivalT = s.expected_arrival || s.expected_departure;
+              if (!arrivalT) continue;
+              
+              const arrivalDate = new Date(arrivalT);
+              
+              if (arrivalDate > now) {
+                  nextStop = s;
+                  prevStop = trackingAllStops[i-1] || trackingAllStops[i];
+                  break;
+              }
           }
 
-          const start = performance.now();
-          const step = (now) => {
-              const t = Math.min(1, (now - start) / duration);
-              const distKm = t * sliceLenKm;
-              const pt = turf.along(slice, distKm, { units: 'kilometers' });
-              const coords = pt.geometry.coordinates;
-              if (map && map.getSource(TRACK_SOURCE_ID)) {
-                  map.getSource(TRACK_SOURCE_ID).setData({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: coords } }] });
+          if (prevStop && nextStop && prevStop !== nextStop) {
+              const startT = new Date(prevStop.expected_departure || prevStop.expected_arrival).getTime();
+              const endT = new Date(nextStop.expected_arrival).getTime();
+              const currentT = now.getTime();
+              
+              if (endT > startT) {
+                  const progress = Math.max(0, Math.min(1, (currentT - startT) / (endT - startT)));
+                  
+                  // Interpolate distance along the route
+                  const startPt = [prevStop.lon, prevStop.lat];
+                  const endPt = [nextStop.lon, nextStop.lat];
+                  
+                  try {
+                      const snappedStart = turf.nearestPointOnLine(trackingRouteGeom, startPt);
+                      const snappedEnd = turf.nearestPointOnLine(trackingRouteGeom, endPt);
+                      
+                      const startDist = snappedStart.properties.location;
+                      const endDist = snappedEnd.properties.location;
+                      
+                      const targetDistKm = lerp(startDist, endDist, progress);
+                      
+                      // Gradual approach to targetDistKm to avoid jumps
+                      if (trackingCurrentDistKm === null) {
+                          trackingCurrentDistKm = targetDistKm;
+                      } else {
+                          // Smooth pursuit: 10% towards target each frame
+                          trackingCurrentDistKm = lerp(trackingCurrentDistKm, targetDistKm, 0.1);
+                      }
+                      
+                      updatePositionAtDistance(trackingCurrentDistKm);
+                  } catch(e) {
+                      console.error("Dead reckoning interpolation error", e);
+                  }
               }
-              trackingCurrentPos = coords.slice();
-              if (t < 1) trackingAnimationFrame = requestAnimationFrame(step);
-              else trackingAnimationFrame = null;
-          };
-          if (trackingAnimationFrame) cancelAnimationFrame(trackingAnimationFrame);
-          trackingAnimationFrame = requestAnimationFrame(step);
-      } catch (e) {
-          // fallback to linear animation
-          animateMarker(fromCoord, toCoord, duration);
-      }
+          }
+      }, 100); // 10fps for smooth movement
   }
 
   async function startTracking(vehicleId) {
@@ -765,6 +801,13 @@
               const nv = JSON.parse(e.data);
               if (!nv || !nv.lat || !nv.lon) return;
 
+              lastSSEUpdateTime = Date.now();
+
+              // Cache all stops for dead reckoning
+              if (nv.all_stops) {
+                  trackingAllStops = nv.all_stops;
+              }
+
               // Use newPos as the target position
               const targetCoords = [nv.lon, nv.lat];
 
@@ -782,6 +825,9 @@
                           // override trackingCurrentPos with snapped position
                           const snappedPt = turf.along(trackingRouteGeom, trackingCurrentDistKm, { units: 'kilometers' });
                           trackingCurrentPos = snappedPt.geometry.coordinates.slice();
+                          
+                          // Start dead reckoning once we have geometry
+                          startDeadReckoning();
                       }
                   } catch(e) { 
                       console.error("Error resolving geometry", e);
@@ -813,9 +859,9 @@
 
                   const movedMeters = Math.abs(targetDistKm - (trackingCurrentDistKm || 0)) * 1000;
                   if (movedMeters > JITTER_THRESHOLD_METERS) {
-                      // Animate between current distance and target distance
-                      animateAlongRouteDistances(trackingRouteGeom, trackingCurrentDistKm || 0, targetDistKm, 1000);
-                      trackingCurrentDistKm = targetDistKm;
+                      // Calibrate our current distance towards the SSE distance
+                      trackingCurrentDistKm = lerp(trackingCurrentDistKm || targetDistKm, targetDistKm, 0.5);
+                      updatePositionAtDistance(trackingCurrentDistKm);
                   }
               } else {
                   // fallback to direct linear marker animation

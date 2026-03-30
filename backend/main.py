@@ -417,14 +417,32 @@ async def get_vehicle_live(vehicle_id: str, request: Request):
                     # Find the "active" stop to get current lat/lon
                     # OVAPI journeys provide coordinates per stop; we look for the one the vehicle is currently at/approaching
                     active_stop = None
-                    for sid in sorted(stops.keys()):
+                    all_stops_data = []
+
+                    # Sort stops by arrival time/sequence
+                    sorted_stop_keys = sorted(stops.keys())
+                    
+                    for sid in sorted_stop_keys:
                         s = stops[sid]
+                        
+                        # Collect all stops with their timing and coordinates
+                        all_stops_data.append({
+                            "stop_id": sid,
+                            "name": s.get("TimingPointName", "Unknown"),
+                            "lat": s.get("Latitude"),
+                            "lon": s.get("Longitude"),
+                            "expected_arrival": s.get("ExpectedArrivalTime", s.get("TargetArrivalTime")),
+                            "expected_departure": s.get("ExpectedDepartureTime", s.get("TargetDepartureTime")),
+                            "status": s.get("TripStopStatus"),
+                            "stop_order": s.get("StopOrder", 0)
+                        })
+
                         if s.get("TripStopStatus") in ("DRIVING", "ARRIVED", "DEPARTING"):
                             active_stop = s
-                            # Don't break immediately, we want the *latest* active one
                     
                     if active_stop:
                         v = normalize_vehicle_data(active_stop, vehicle_id, "")
+                        v["all_stops"] = all_stops_data # Attach all stops for dead reckoning
                         new_hash = hash_vehicle(v)
                         
                         if new_hash != last_hash:
